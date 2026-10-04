@@ -112,15 +112,27 @@ mdm_tmp="$(mktemp -d)"
     write_mdm_config 'team&co' 'id<with>chars' 'secret&value'
 ) >/dev/null 2>&1
 if [ -f "$mdm_tmp/mdm.xml" ] \
-   && python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$mdm_tmp/mdm.xml" 2>/dev/null; then
+   && python3 -c 'import sys,xml.etree.ElementTree as E; E.parse(sys.argv[1])' "$mdm_tmp/mdm.xml" 2>"$mdm_tmp/parse.err"; then
     ok "MDM configuration stays valid XML with special characters"
 else
     bad "MDM configuration is malformed when values contain & or <"
+    # Print the reason rather than swallowing it: the XML may be well-formed
+    # while the interpreter itself is the problem.
+    sed -n '1,5p' "$mdm_tmp/mdm.xml" 2>/dev/null | sed 's/^/        /' || true
+    sed -n '1,5p' "$mdm_tmp/parse.err" 2>/dev/null | sed 's/^/        /' || true
 fi
 if grep -q 'team&amp;co' "$mdm_tmp/mdm.xml" 2>/dev/null; then
-    ok "MDM values are XML-escaped"
+    ok "MDM values are XML-escaped (&)"
 else
-    bad "MDM values are not XML-escaped"
+    bad "MDM values are not XML-escaped (&)"
+fi
+# Assert the < and > cases explicitly. Checking only '&' misses the bash 5.2
+# patsub_replacement bug, where '&lt;' expands to '<lt;' and emits a raw '<'.
+if grep -q 'id&lt;with&gt;chars' "$mdm_tmp/mdm.xml" 2>/dev/null; then
+    ok "MDM values are XML-escaped (< and >)"
+else
+    bad "MDM values are not XML-escaped (< and >)"
+    grep -n 'auth_client_id' -A1 "$mdm_tmp/mdm.xml" 2>/dev/null | sed 's/^/        /' || true
 fi
 rm -rf "$mdm_tmp"
 

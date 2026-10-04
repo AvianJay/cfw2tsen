@@ -316,6 +316,17 @@ check(not undefined,
       + (f" (undefined: {sorted(undefined)})" if undefined else ""))
 print(f"  {len(defined)} helpers defined, {len(called)} distinct helpers called")
 
+# bash 5.2 (Debian bookworm) enables patsub_replacement by default, so an
+# unquoted '&' in a ${var//pat/repl} replacement expands to the matched text.
+# That silently corrupts XML escaping: '&lt;' becomes '<lt;'. Any script that
+# puts '&' in a replacement must turn the option off first.
+for script in scripts:
+    text = script.read_text(encoding="utf-8")
+    if re.search(r'\$\{[^{}]*//[^{}]*&[a-z]+;', text):
+        check("patsub_replacement" in text,
+              f"{script.name} disables patsub_replacement before using '&' in a "
+              "replacement (bash 5.2 would expand it to the match)")
+
 print("\n== docs ==")
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
 for topic in ("TS_AUTHKEY", "TS_DEVICE_IP", "WARP_NETNS", "exit node",

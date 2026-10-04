@@ -98,6 +98,11 @@ warp_registered() {
 # silently rejects, leaving the device unenrolled.
 xml_escape() {
     local s="$1"
+    # bash 5.2 (Debian bookworm) enables patsub_replacement by default: an
+    # unquoted '&' in the replacement expands to the matched text, so '&lt;'
+    # would become '<lt;' and emit a raw '<'. Turn that off so the replacement
+    # is literal on every bash version.
+    shopt -u patsub_replacement 2>/dev/null || true
     s="${s//&/&amp;}"
     s="${s//</&lt;}"
     s="${s//>/&gt;}"
