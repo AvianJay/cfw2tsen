@@ -135,6 +135,17 @@ check(env.get("WARP_NETNS") == "warpns",
 caps = svc.get("cap_add", [])
 for cap in ("NET_ADMIN", "NET_RAW", "SYS_ADMIN", "MKNOD", "SYS_MODULE"):
     check(cap in caps, f"cap_add includes {cap} (matches the README)")
+
+# The README's inline compose snippet must list the same capabilities as the
+# real compose file, or users copying it get a container that cannot start.
+snippet_caps = re.search(r"cap_add:\s*\[([^\]]+)\]",
+                         (ROOT / "README.md").read_text(encoding="utf-8"))
+check(snippet_caps is not None, "README contains a cap_add snippet")
+if snippet_caps:
+    listed = {c.strip() for c in snippet_caps.group(1).split(",")}
+    check(listed == set(caps),
+          "README cap_add snippet matches docker-compose.yml "
+          f"(README={sorted(listed)}, compose={sorted(caps)})")
 check(any("/dev/net/tun" in str(d) for d in svc.get("devices", [])),
       "the tun device is passed through")
 sysctls = svc.get("sysctls", {})
@@ -226,6 +237,67 @@ for script in scripts:
         continue
     check('readlink -f "${BASH_SOURCE[0]}"' in text,
           f"{script.name} resolves SELF_DIR through symlinks")
+
+print("\n== function cross-references ==")
+# Catch a call to a helper that does not exist (a typo, or a function that was
+# renamed in one file only). This is the failure mode that only shows up at
+# runtime, mid-startup, on a user's host.
+PREFIXES = (
+    "warp_", "ts_", "ns_", "nft_", "root_nft_", "setup_", "verify_", "detect_",
+    "ensure_", "start_", "stop_", "connect_", "register_", "exclude_", "await_",
+    "apply_", "resolve_", "api_", "tailscale_", "bring_up_", "print_", "teardown_",
+    "reapply_", "create_", "dump_", "cmd_", "xml_", "log_", "env_", "require_",
+    "retry", "wait_for", "die", "ok", "bad", "skipped", "section", "fail", "usage",
+    "cleanup_probe", "warp_cli", "ts_cli", "nft_table", "nft_chain", "nft_has",
+    "nft_rule", "root_nft_table", "root_nft_chain", "root_nft_has", "root_nft_rule",
+    "check", "load", "head",
+)
+
+defined: set[str] = set()
+sources: dict[str, str] = {}
+for script in scripts:
+    text = script.read_text(encoding="utf-8")
+    sources[script.name] = text
+    # Allow indentation: nested definitions are legal and become global.
+    defined.update(re.findall(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{", text, re.MULTILINE))
+
+called: dict[str, set[str]] = {}
+for name, text in sources.items():
+    heredoc_end: str | None = None
+    for line in text.splitlines():
+        # Skip the body of a heredoc: it is data, not code.
+        if heredoc_end is not None:
+            if line.strip() == heredoc_end:
+                heredoc_end = None
+            continue
+        heredoc = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*$", line)
+        if heredoc:
+            heredoc_end = heredoc.group(1)
+            continue
+
+        stripped = line.strip()
+        # Skip comments and case labels (`check)`, `status)`, `-h|--help)`).
+        if stripped.startswith("#"):
+            continue
+        if re.match(r"^[A-Za-z0-9_*|\-\.]+\)", stripped):
+            continue
+        match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s", line)
+        if not match:
+            continue
+        token = match.group(1)
+        if not any(token == p or token.startswith(p) for p in PREFIXES):
+            continue
+        called.setdefault(token, set()).add(name)
+
+undefined = {
+    token: sorted(files)
+    for token, files in called.items()
+    if token not in defined
+}
+check(not undefined,
+      "every helper call resolves to a definition"
+      + (f" (undefined: {sorted(undefined)})" if undefined else ""))
+print(f"  {len(defined)} helpers defined, {len(called)} distinct helpers called")
 
 print("\n== docs ==")
 readme = (ROOT / "README.md").read_text(encoding="utf-8")

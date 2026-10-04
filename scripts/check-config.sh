@@ -98,7 +98,14 @@ if [ "$MODE" != "tailscale-only" ]; then
 
     case "${WARP_MODE:-warp}" in
         warp)  ok "WARP_MODE=warp (full tunnel)" ;;
-        proxy) warn "WARP_MODE=proxy: no UDP, 10s request timeout, and it cannot be an exit node upstream" ;;
+        proxy)
+            warn "WARP_MODE=proxy: no UDP, 10s request timeout, and it cannot be an exit node upstream"
+            # The SOCKS listener binds 127.0.0.1 inside whichever namespace it
+            # runs in, so isolating it would make the proxy unreachable.
+            if [ -n "${WARP_NETNS:-}" ]; then
+                bad "WARP_MODE=proxy with WARP_NETNS=${WARP_NETNS} makes the SOCKS proxy unreachable; set WARP_NETNS= for proxy mode"
+            fi
+            ;;
         *)     warn "WARP_MODE=${WARP_MODE} is unusual; expected warp or proxy" ;;
     esac
 

@@ -110,7 +110,7 @@ One container, both components, WARP isolated. See `docker-compose.yml`.
 services:
   cfw2tsen:
     image: ghcr.io/your-user/cfw2tsen:latest
-    cap_add: [NET_ADMIN, NET_RAW, MKNOD, SYS_MODULE]
+    cap_add: [NET_ADMIN, NET_RAW, SYS_ADMIN, MKNOD, SYS_MODULE]
     devices: ["/dev/net/tun:/dev/net/tun"]
     sysctls:
       net.ipv4.ip_forward: 1

@@ -93,7 +93,12 @@ bring_up_warp() {
     if [ "${WARP_MODE:-warp}" = "proxy" ]; then
         log_info "Proxy mode selected; skipping tunnel and NAT configuration"
         warp_cli connect >/dev/null 2>&1 || true
-        log_info "WARP SOCKS5 proxy on 127.0.0.1:${WARP_PROXY_PORT:-40000}"
+        local listen="127.0.0.1"
+        [ -n "${WARP_NETNS:-}" ] && listen="127.0.0.1 inside netns ${WARP_NETNS}"
+        log_info "WARP SOCKS5 proxy listening on ${listen}:${WARP_PROXY_PORT:-40000}"
+        if [ -n "${WARP_NETNS:-}" ]; then
+            log_warn "The SOCKS proxy is bound inside ${WARP_NETNS} and is not reachable from the container. Set WARP_NETNS= for proxy mode."
+        fi
         return 0
     fi
 

@@ -28,6 +28,12 @@ case "$MODE" in
         # WARP side
         warp_cli status >/dev/null 2>&1 || fail "warp-svc is not responding"
         warp_connected || fail "WARP is not connected"
+
+        if [ "${WARP_MODE:-warp}" = "proxy" ]; then
+            printf 'healthy: WARP SOCKS proxy mode\n'
+            exit 0
+        fi
+
         tun="$(detect_warp_tun "${WARP_TUN_IFACE:-CloudflareWARP}")"
         ns_run ip link show "$tun" >/dev/null 2>&1 || fail "WARP tunnel ${tun} is missing"
 
@@ -44,6 +50,12 @@ case "$MODE" in
     warp-only)
         warp_cli status >/dev/null 2>&1 || fail "warp-svc is not responding"
         warp_connected || fail "WARP is not connected"
+
+        if [ "${WARP_MODE:-warp}" = "proxy" ]; then
+            printf 'healthy: WARP SOCKS proxy mode\n'
+            exit 0
+        fi
+
         tun="$(detect_warp_tun "${WARP_TUN_IFACE:-CloudflareWARP}")"
         ns_run ip link show "$tun" >/dev/null 2>&1 || fail "WARP tunnel ${tun} is missing"
         printf 'healthy: WARP NAT gateway on %s\n' "$tun"
