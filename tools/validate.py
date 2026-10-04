@@ -327,6 +327,18 @@ for script in scripts:
               f"{script.name} disables patsub_replacement before using '&' in a "
               "replacement (bash 5.2 would expand it to the match)")
 
+# The `smoke` subcommand must bring the plumbing up itself. It previously only
+# ran the assertions, so it failed on the very topology it was meant to verify
+# unless a second env var happened to be set.
+entry = (ROOT / "scripts/entrypoint.sh").read_text(encoding="utf-8")
+smoke_case = re.search(r"smoke\)(.*?);;", entry, re.DOTALL)
+check(smoke_case is not None, "entrypoint handles the smoke subcommand")
+if smoke_case:
+    body = smoke_case.group(1)
+    for helper in ("ns_create", "setup_veth_pair", "setup_warpns_underlay"):
+        check(helper in body,
+              f"smoke subcommand calls {helper} (it asserts on that topology)")
+
 print("\n== docs ==")
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
 for topic in ("TS_AUTHKEY", "TS_DEVICE_IP", "WARP_NETNS", "exit node",

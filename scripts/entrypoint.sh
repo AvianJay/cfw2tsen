@@ -218,7 +218,17 @@ main() {
     # CI / diagnostic entry points that do not contact any network.
     case "${1:-}" in
         selftest)  exec bash "${SELF_DIR}/selftest.sh" ;;
-        smoke)     exec bash "${SELF_DIR}/smoke.sh" ;;
+        smoke)
+            # Bring the plumbing up first, then assert on it. This is the whole
+            # point of the mode, so it must not depend on a second env var.
+            require_cmd ip nft
+            if [ -n "${WARP_NETNS:-}" ]; then
+                ns_create "$WARP_NETNS"
+                setup_veth_pair "$WARP_NETNS"
+                setup_warpns_underlay "$WARP_NETNS"
+            fi
+            exec bash "${SELF_DIR}/smoke.sh"
+            ;;
         check)     exec bash "${SELF_DIR}/check-config.sh" ;;
         shell)     exec bash ;;
         -h|--help)
@@ -241,7 +251,7 @@ EOF
     require_cmd ip nft curl jq
 
     if [ "$(env_bool SMOKE_TEST 0)" = "1" ]; then
-        # Bring up the plumbing, verify it, then exit without connecting.
+        # Backwards-compatible alias for the same thing.
         [ -n "${WARP_NETNS:-}" ] && { ns_create "$WARP_NETNS"; setup_veth_pair "$WARP_NETNS"; setup_warpns_underlay "$WARP_NETNS"; }
         exec bash "${SELF_DIR}/smoke.sh"
     fi
