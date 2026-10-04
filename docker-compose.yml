@@ -1,0 +1,84 @@
+# cfw2tsen — single container: Cloudflare WARP egress + Tailscale exit node.
+#
+# WARP runs inside its own network namespace within this container, so its
+# nftables `policy drop` cannot break inbound WireGuard from tailnet peers.
+#
+#   cp .env.example .env    # fill in TS_AUTHKEY
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Then approve the exit node: https://login.tailscale.com/admin/machines
+
+services:
+  cfw2tsen:
+    build:
+      context: .
+    image: ghcr.io/your-user/cfw2tsen:latest
+    container_name: cfw2tsen
+    hostname: cfw2tsen
+
+    # WARP installs nftables rules, creates a TUN device and a network
+    # namespace; Tailscale needs the same.
+    #
+    # SYS_ADMIN is required, not optional: creating a network namespace
+    # (unshare(CLONE_NEWNET)) and entering it (setns) both need it. NET_ADMIN
+    # alone is enough for the nftables rules but not for the namespace.
+    #
+    # If your runtime still refuses these, replace the whole block with
+    # `privileged: true` (see README).
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+      - MKNOD
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    sysctls:
+      net.ipv4.ip_forward: 1
+      net.ipv6.conf.all.forwarding: 1
+      net.ipv4.conf.all.src_valid_mark: 1
+
+    environment:
+      MODE: all-in-one
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # --- Cloudflare WARP ------------------------------------------------
+      WARP_ENABLE: 1
+      WARP_MODE: warp
+      # Must stay non-empty in all-in-one mode.
+      WARP_NETNS: warpns
+      WARP_ENABLE_NAT: 1
+      WARP_EXCLUDE_TAILSCALE: 1
+      # Zero Trust service token (optional):
+      # WARP_ORG: your-team
+      # WARP_AUTH_CLIENT_ID: ${WARP_AUTH_CLIENT_ID}
+      # WARP_AUTH_CLIENT_SECRET: ${WARP_AUTH_CLIENT_SECRET}
+      # WARP+ license (optional):
+      # WARP_LICENSE_KEY: ${WARP_LICENSE_KEY}
+
+      # --- Tailscale ------------------------------------------------------
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      TS_HOSTNAME: ${TS_HOSTNAME:-cfw2tsen-exit-node}
+      TS_ADVERTISE_EXIT_NODE: 1
+      TS_USERSPACE: "false"
+      TS_ACCEPT_DNS: "false"
+      TS_AUTH_ONCE: "true"
+
+      # Pin this node's IPv4 address (optional). Requires an API credential.
+      # TS_DEVICE_IP: 100.64.0.10
+      # TS_API_KEY: ${TS_API_KEY}
+      # TS_TAILNET: your-tailnet.ts.net
+
+    volumes:
+      # Persist identity. Without these the node re-registers on every restart.
+      - tailscale-state:/var/lib/tailscale
+      - warp-state:/var/lib/cloudflare-warp
+
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  tailscale-state:
+  warp-state:

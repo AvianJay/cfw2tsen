@@ -1,0 +1,258 @@
+name: build
+
+# Builds the image, runs the in-image self test and the networking smoke test,
+# then publishes a multi-arch image to GHCR (and Docker Hub when configured).
+#
+#   push to main/master      build + test + push :edge and :sha-<short>
+#   tag v1.2.3               build + test + push :1.2.3, :1.2, :1, :latest
+#   pull request             build + test only
+#   manual dispatch          build + test + push :<branch> and :sha-<short>
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: Push the image to the registries
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cheap gate: shell syntax, static analysis and repository invariants.
+  # Runs before anything is built, so a typo fails in seconds.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          # python3-yaml from apt rather than pip: Ubuntu 24.04 runners are
+          # externally managed (PEP 668) and refuse to install into system Python.
+          sudo apt-get install -y --no-install-recommends shellcheck python3-yaml
+
+      - name: bash -n (syntax)
+        run: |
+          shopt -s nullglob
+          status=0
+          for f in scripts/*.sh; do
+            echo "::group::bash -n $f"
+            if bash -n "$f"; then
+              echo "ok"
+            else
+              echo "::error file=$f::syntax error"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -x -S warning scripts/*.sh
+
+      - name: Encoding and repository validation
+        run: |
+          python3 tools/check_encoding.py
+          python3 tools/validate.py
+
+  # ---------------------------------------------------------------------------
+  # Build for both architectures, exercise the image, then push a single
+  # multi-arch manifest.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    needs: lint
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Which registries are configured. Secrets cannot be referenced directly
+      # in an `if:` conditional, so they are surfaced through an env var here.
+      - name: Determine target registries
+        id: registries
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          images="${REGISTRY}/${IMAGE_NAME}"
+          if [ -n "${DOCKERHUB_USERNAME}" ]; then
+            images="${images}"$'\n'"${DOCKERHUB_USERNAME}/cfw2tsen"
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub publishing enabled as ${DOCKERHUB_USERNAME}"
+          else
+            echo "dockerhub=false" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub secrets not set; publishing to GHCR only"
+          fi
+          {
+            echo "images<<__IMAGES_EOF__"
+            echo "$images"
+            echo "__IMAGES_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request' && steps.registries.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.registries.outputs.images }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=cfw2tsen
+            org.opencontainers.image.description=Cloudflare WARP egress for a Tailscale exit node
+            org.opencontainers.image.licenses=MIT
+
+      # Build a single-arch image locally first: the smoke test needs to run
+      # containers, which a cross-built image cannot do. provenance is disabled
+      # because attestations cannot be attached to a locally loaded image.
+      - name: Build (local, amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: cfw2tsen:test
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image metadata
+        run: |
+          docker image inspect cfw2tsen:test \
+            --format 'size={{.Size}} arch={{.Architecture}} os={{.Os}}'
+
+      # Validates the image contents and starts warp-svc for real.
+      - name: Self test
+        run: |
+          docker run --rm \
+            --cap-add NET_ADMIN \
+            --cap-add MKNOD \
+            --device /dev/net/tun \
+            cfw2tsen:test selftest
+
+      # Validates the netns/veth/policy-routing plumbing, still without
+      # contacting Cloudflare or Tailscale. The capability set is exactly the one
+      # the README and compose file document, so documentation drift fails the
+      # build here rather than on a user's host.
+      - name: Networking smoke test (documented capability set)
+        run: |
+          docker run --rm \
+            --cap-add NET_ADMIN \
+            --cap-add NET_RAW \
+            --cap-add SYS_ADMIN \
+            --cap-add MKNOD \
+            --device /dev/net/tun \
+            --sysctl net.ipv4.ip_forward=1 \
+            --sysctl net.ipv6.conf.all.forwarding=1 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            cfw2tsen:test smoke
+
+      - name: Configuration validation
+        run: |
+          # Co-locating WARP and Tailscale in one namespace must be refused.
+          if docker run --rm \
+               -e MODE=all-in-one -e WARP_NETNS= -e TS_AUTHKEY=tskey-auth-ci \
+               --entrypoint /usr/local/bin/entrypoint.sh \
+               cfw2tsen:test check; then
+            echo "::error::check-config accepted an unsafe configuration"
+            exit 1
+          fi
+          echo "check-config correctly rejected the unsafe configuration"
+
+          # A valid configuration must be accepted.
+          docker run --rm \
+            -e MODE=all-in-one -e WARP_NETNS=warpns -e TS_AUTHKEY=tskey-auth-ci \
+            --entrypoint /usr/local/bin/entrypoint.sh \
+            cfw2tsen:test check
+
+      - name: Build and push (multi-arch)
+        id: push
+        if: >-
+          github.event_name != 'pull_request' &&
+          (github.event_name != 'workflow_dispatch' || inputs.push_image)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Verify the published manifest
+        if: steps.push.outcome == 'success'
+        run: |
+          set -euo pipefail
+          first_tag="$(echo "${{ steps.meta.outputs.tags }}" | head -n1)"
+          echo "Inspecting ${first_tag}"
+          docker buildx imagetools inspect "$first_tag"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### cfw2tsen build"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Platforms | \`linux/amd64\`, \`linux/arm64\` |"
+            echo "| Registries | GHCR${{ steps.registries.outputs.dockerhub == 'true' && ' + Docker Hub' || '' }} |"
+            echo "| Pushed | ${{ steps.push.outcome == 'success' && 'yes' || 'no' }} |"
+            echo
+            echo "Tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+.env
+.env.*
+!.env.example
+*.md
+!README.md
+data/
+state/
+*.log
+*.tar
+*.tar.gz

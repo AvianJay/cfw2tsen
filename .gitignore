@@ -1,0 +1,16 @@
+# Local state, secrets and build output.
+.env
+.env.local
+*.log
+
+# Compose volumes when bound to the filesystem.
+data/
+state/
+tailscale-state/
+warp-state/
+
+# Editor / OS noise.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
