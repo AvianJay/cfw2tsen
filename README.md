@@ -21,7 +21,7 @@ tailnet.
 ## Quick start
 
 ```bash
-git clone https://github.com/AvianJay/cfw2tsen.git
+git clone https://github.com/avianjay/cfw2tsen.git
 cd cfw2tsen
 cp .env.example .env
 # Put your Tailscale auth key in .env
@@ -109,7 +109,7 @@ One container, both components, WARP isolated. See `docker-compose.yml`.
 ```yaml
 services:
   cfw2tsen:
-    image: ghcr.io/AvianJay/cfw2tsen:latest
+    image: ghcr.io/avianjay/cfw2tsen:latest
     cap_add: [NET_ADMIN, NET_RAW, SYS_ADMIN, MKNOD, SYS_MODULE]
     devices: ["/dev/net/tun:/dev/net/tun"]
     sysctls:
@@ -150,7 +150,7 @@ docker run -d --name cfw2tsen \
   -v tailscale-state:/var/lib/tailscale \
   -v warp-state:/var/lib/cloudflare-warp \
   --restart unless-stopped \
-  ghcr.io/AvianJay/cfw2tsen:latest
+  ghcr.io/avianjay/cfw2tsen:latest
 ```
 
 > **Why `SYS_ADMIN`.** Creating a network namespace (`unshare(CLONE_NEWNET)`)

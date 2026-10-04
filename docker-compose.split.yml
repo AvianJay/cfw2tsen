@@ -29,7 +29,7 @@ services:
   warp-gateway:
     build:
       context: .
-    image: ghcr.io/AvianJay/cfw2tsen:latest
+    image: ghcr.io/avianjay/cfw2tsen:latest
     container_name: cfw2tsen-warp
     hostname: warp-gateway
     # No SYS_ADMIN here: this role does not create a network namespace, so
@@ -74,7 +74,7 @@ services:
   exit-node:
     build:
       context: .
-    image: ghcr.io/AvianJay/cfw2tsen:latest
+    image: ghcr.io/avianjay/cfw2tsen:latest
     container_name: cfw2tsen-exit
     hostname: cfw2tsen-exit-node
     depends_on:
