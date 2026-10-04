@@ -64,6 +64,8 @@ root_nft_rule()  { nft add rule "$@"; }
 
 setup_veth_pair() {
     local ns="$1"
+    local pid
+    pid="$(_ns_pid)" || die "No network namespace is held; call ns_create first."
 
     if ip link show "$VETH_HOST_IF" >/dev/null 2>&1; then
         log_debug "veth ${VETH_HOST_IF} already present"
@@ -72,15 +74,16 @@ setup_veth_pair() {
 
     log_info "Creating veth pair ${VETH_HOST_IF} <-> ${VETH_WARP_IF} (ns ${ns})"
     ip link add "$VETH_HOST_IF" type veth peer name "$VETH_WARP_IF"
-    ip link set "$VETH_WARP_IF" netns "$ns"
+    # Move the peer into the held namespace by PID.
+    ip link set "$VETH_WARP_IF" netns "$pid"
 
     ip addr add "${VETH_HOST_IP}/${VETH_PREFIX}" dev "$VETH_HOST_IF"
     ip link set "$VETH_HOST_IF" up
     sysctl -qw "net.ipv4.conf.${VETH_HOST_IF}.rp_filter=0" 2>/dev/null || true
 
-    ip netns exec "$ns" ip addr add "${VETH_WARP_IP}/${VETH_PREFIX}" dev "$VETH_WARP_IF"
-    ip netns exec "$ns" ip link set "$VETH_WARP_IF" up
-    ip netns exec "$ns" ip link set lo up
+    ns_run ip addr add "${VETH_WARP_IP}/${VETH_PREFIX}" dev "$VETH_WARP_IF"
+    ns_run ip link set "$VETH_WARP_IF" up
+    ns_run ip link set lo up
     sysctl -qw net.ipv4.conf.all.forwarding=1 2>/dev/null || true
 }
 
@@ -88,13 +91,16 @@ setup_veth_pair() {
 # Cloudflare edge; its tunnelled default route is installed by WARP itself.
 setup_warpns_underlay() {
     local ns="$1"
-    ip netns exec "$ns" ip route replace default via "$VETH_HOST_IP" dev "$VETH_WARP_IF"
+    ns_run ip route replace default via "$VETH_HOST_IP" dev "$VETH_WARP_IF"
 
-    # WARP rewrites /etc/resolv.conf from inside the namespace; give it a
-    # working resolver for the registration handshake. ip-netns(8) bind-mounts
-    # /etc/netns/<name>/resolv.conf over /etc/resolv.conf for this namespace.
-    mkdir -p "/etc/netns/${ns}"
-    printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > "/etc/netns/${ns}/resolv.conf"
+    # WARP rewrites /etc/resolv.conf from inside the namespace. `ip netns exec`
+    # would bind-mount /etc/netns/<name>/resolv.conf, but this container reaches
+    # the namespace with nsenter, so point the resolver at Cloudflare directly
+    # and keep a backup for anything that wants to restore it.
+    if [ ! -e /etc/resolv.conf.cfw2tsen.orig ] && [ -e /etc/resolv.conf ]; then
+        cp -a /etc/resolv.conf /etc/resolv.conf.cfw2tsen.orig 2>/dev/null || true
+    fi
+    printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > /etc/resolv.conf
 
     log_info "warpns underlay: default via ${VETH_HOST_IP} dev ${VETH_WARP_IF}"
 }
@@ -304,19 +310,34 @@ verify_forwarded_egress() {
 
     # The probe gets its own /30: the WARP veth already owns VETH_HOST_IP and
     # VETH_WARP_IP, so reusing that subnet would collide.
-    local probe_ns="cfw2tsen-verify"
     local probe_if="probe0"
     local probe_host_ip="${PROBE_HOST_IP:-10.201.0.1}"
     local probe_ns_ip="${PROBE_NS_IP:-10.201.0.2}"
+    local probe_pid=""
+
+    # A probe namespace is created the same way as the WARP one (unshare +
+    # nsenter), because `ip netns add` is blocked by Docker's AppArmor profile.
+    probe_run() { nsenter --net="/proc/${probe_pid}/ns/net" -- "$@"; }
 
     cleanup_probe() {
-        ip netns pids "$probe_ns" 2>/dev/null | xargs -r kill 2>/dev/null || true
-        ip netns delete "$probe_ns" 2>/dev/null || true
+        [ -n "$probe_pid" ] || return 0
+        kill -TERM "$probe_pid" 2>/dev/null || true
+        sleep 0.1
+        kill -KILL "$probe_pid" 2>/dev/null || true
+        wait "$probe_pid" 2>/dev/null || true
+        probe_pid=""
     }
 
-    cleanup_probe
-    if ! ip netns add "$probe_ns" 2>/dev/null; then
+    unshare --net -- sleep infinity &
+    probe_pid=$!
+    local waited=0
+    while [ ! -e "/proc/${probe_pid}/ns/net" ] && (( waited < 50 )); do
+        sleep 0.1
+        waited=$(( waited + 1 ))
+    done
+    if [ ! -e "/proc/${probe_pid}/ns/net" ]; then
         log_warn "Could not create a probe namespace; skipping forwarded egress verification"
+        cleanup_probe
         return 0
     fi
 
@@ -325,15 +346,15 @@ verify_forwarded_egress() {
         cleanup_probe
         return 0
     fi
-    ip link set "${probe_if}-p" netns "$probe_ns"
+    ip link set "${probe_if}-p" netns "$probe_pid"
     ip addr add "${probe_host_ip}/30" dev "$probe_if"
     ip link set "$probe_if" up
-    ip netns exec "$probe_ns" ip addr add "${probe_ns_ip}/30" dev "${probe_if}-p"
-    ip netns exec "$probe_ns" ip link set "${probe_if}-p" up
-    ip netns exec "$probe_ns" ip link set lo up
+    probe_run ip addr add "${probe_ns_ip}/30" dev "${probe_if}-p"
+    probe_run ip link set "${probe_if}-p" up
+    probe_run ip link set lo up
     # The probe has no other interface, so everything it sends must be
     # forwarded by this container -- exactly the exit-node client's situation.
-    ip netns exec "$probe_ns" ip route add default via "$probe_host_ip" dev "${probe_if}-p"
+    probe_run ip route add default via "$probe_host_ip" dev "${probe_if}-p"
 
     # Steer only what arrives on the probe interface, so this does not disturb
     # the real tailscale0 rule.
@@ -345,7 +366,7 @@ verify_forwarded_egress() {
     nft_chain inet cfw2tsen forward '{ type filter hook forward priority 0; policy accept; }'
 
     local trace warp ip
-    trace="$(ip netns exec "$probe_ns" curl -fsS --max-time 20 \
+    trace="$(probe_run curl -fsS --max-time 20 \
              https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
 
     ip rule del iif "$probe_if" lookup "$WARP_ROUTE_TABLE" pref 1001 2>/dev/null || true

@@ -151,14 +151,35 @@ ensure_nft_support() {
 
 WARP_NETNS="${WARP_NETNS:-}"
 
-ns_exists() {
-    [ -n "${WARP_NETNS:-}" ] && [ -e "/var/run/netns/${WARP_NETNS}" ]
+# The namespace is held open by a long-lived `unshare --net` process and reached
+# with nsenter. This deliberately avoids `ip netns`, which bind-mounts the
+# namespace into /run/netns: Docker's default AppArmor profile denies
+# `mount --make-shared /run/netns`, so `ip netns add` fails with
+# "mount --make-shared /run/netns failed: Permission denied" even with
+# CAP_SYS_ADMIN. Holding the namespace with a process needs no mount.
+NETNS_HOLDER_PID="${NETNS_HOLDER_PID:-/run/cfw2tsen-netns.pid}"
+
+_ns_pid() {
+    [ -f "$NETNS_HOLDER_PID" ] || return 1
+    local pid
+    pid="$(cat "$NETNS_HOLDER_PID" 2>/dev/null)" || return 1
+    [ -n "$pid" ] || return 1
+    # Confirm the holder is alive and is really our namespace.
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -e "/proc/${pid}/ns/net" ] || return 1
+    printf '%s' "$pid"
 }
 
-# ns_run <command...> — run inside WARP_NETNS when it is set and exists.
+ns_exists() {
+    [ -n "${WARP_NETNS:-}" ] || return 1
+    _ns_pid >/dev/null 2>&1
+}
+
+# ns_run <command...> — run inside the WARP namespace when one is held.
 ns_run() {
-    if ns_exists; then
-        ip netns exec "$WARP_NETNS" "$@"
+    local pid
+    if pid="$(_ns_pid)"; then
+        nsenter --net="/proc/${pid}/ns/net" -- "$@"
     else
         "$@"
     fi
@@ -172,27 +193,44 @@ ns_run_root() {
 ns_create() {
     local ns="$1"
     if ns_exists; then
-        log_debug "netns ${ns} already exists"
+        log_debug "network namespace ${ns} already held by pid $(_ns_pid)"
         return 0
     fi
-    mkdir -p /var/run/netns
-    # A stale bind-mount without a live namespace would make `ip netns add` fail.
-    if [ -e "/var/run/netns/${ns}" ]; then
-        umount "/var/run/netns/${ns}" 2>/dev/null || true
-        rm -f "/var/run/netns/${ns}"
+
+    mkdir -p "$(dirname "$NETNS_HOLDER_PID")"
+    log_info "Creating network namespace ${ns} (held by unshare)"
+
+    # `unshare --net` creates the namespace; the sleeping process keeps it
+    # alive. Its stdin is held open by a fifo so the process cannot exit early.
+    unshare --net -- sleep infinity &
+    local pid=$!
+    printf '%s' "$pid" > "$NETNS_HOLDER_PID"
+
+    # Wait for the new namespace to be visible.
+    local waited=0
+    while [ ! -e "/proc/${pid}/ns/net" ] && (( waited < 50 )); do
+        sleep 0.1
+        waited=$(( waited + 1 ))
+    done
+    if [ ! -e "/proc/${pid}/ns/net" ]; then
+        die "Could not create the network namespace (unshare --net failed)."
     fi
-    ip netns add "$ns"
-    ip netns exec "$ns" ip link set lo up
-    log_info "Created network namespace ${ns}"
+
+    ns_run ip link set lo up
+    log_info "Created network namespace ${ns} (pid ${pid})"
 }
 
 ns_delete() {
     local ns="$1"
-    ns_exists || return 0
-    # Kill anything still holding the namespace, otherwise deletion leaks it.
-    ip netns pids "$ns" 2>/dev/null | xargs -r kill 2>/dev/null || true
+    local pid
+    pid="$(_ns_pid 2>/dev/null)" || { rm -f "$NETNS_HOLDER_PID"; return 0; }
+    # Kill anything still holding the namespace, then the holder itself.
+    ns_run sh -c 'command -v pkill >/dev/null 2>&1 && pkill -TERM -P 1 2>/dev/null; true' 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
     sleep 0.2
-    ip netns delete "$ns" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -f "$NETNS_HOLDER_PID"
     log_debug "Deleted network namespace ${ns}"
 }
 

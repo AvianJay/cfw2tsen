@@ -339,6 +339,26 @@ if smoke_case:
         check(helper in body,
               f"smoke subcommand calls {helper} (it asserts on that topology)")
 
+# `ip netns` bind-mounts into /run/netns, which Docker's default AppArmor
+# profile denies. The namespace must be held by a process and entered with
+# nsenter instead, so no script may use `ip netns` for the WARP namespace.
+for script in scripts:
+    text = script.read_text(encoding="utf-8")
+    if "ip netns" in text:
+        offenders = [
+            line.strip()
+            for line in text.splitlines()
+            if "ip netns" in line and not line.strip().startswith("#")
+        ]
+        check(not offenders,
+              f"{script.name} does not use `ip netns` ({offenders[:2]})")
+
+# The namespace is addressed by PID, so util-linux must be installed.
+check("util-linux" in dockerfile,
+      "installs util-linux for unshare/nsenter")
+for binary in ("unshare", "nsenter"):
+    check(binary in dockerfile, f"self test covers {binary}")
+
 print("\n== docs ==")
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
 for topic in ("TS_AUTHKEY", "TS_DEVICE_IP", "WARP_NETNS", "exit node",

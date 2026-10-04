@@ -41,8 +41,8 @@ create_stub_tailscale_iface() {
 
 dump_state() {
     echo
-    echo "--- namespaces ---"
-    ip netns list 2>&1 || true
+    echo "--- namespace holder ---"
+    _ns_pid 2>/dev/null | sed 's/^/  pid /' || echo "  (none)"
     echo "--- root links ---"
     ip -brief addr show 2>&1 || true
     echo "--- root rules ---"
@@ -68,7 +68,11 @@ echo
 echo "== namespace and veth =="
 
 if [ -n "${WARP_NETNS:-}" ]; then
-    ns_exists && ok "netns ${WARP_NETNS} exists" || bad "netns ${WARP_NETNS} is missing"
+    if ns_exists; then
+        ok "netns ${WARP_NETNS} is held (pid $(_ns_pid))"
+    else
+        bad "netns ${WARP_NETNS} is missing"
+    fi
 
     if ip link show "${VETH_HOST_IF:-veth-host}" >/dev/null 2>&1; then
         ok "veth host side ${VETH_HOST_IF:-veth-host} exists"

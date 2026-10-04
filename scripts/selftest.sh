@@ -39,7 +39,7 @@ done
 # ---------------------------------------------------------------------------
 section "Required binaries"
 # ---------------------------------------------------------------------------
-for c in bash ip nft iptables curl jq dbus-daemon warp-svc warp-cli tailscaled tailscale tini python3; do
+for c in bash ip nft iptables curl jq dbus-daemon warp-svc warp-cli tailscaled tailscale tini python3 unshare nsenter; do
     if command -v "$c" >/dev/null 2>&1; then
         ok "found $c"
     else

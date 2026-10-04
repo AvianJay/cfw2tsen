@@ -38,6 +38,7 @@ RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
 
 # dbus         warp-svc talks to a system bus, even headless
 # iproute2     ip / ss, required for the netns + policy routing glue
+# util-linux   unshare / nsenter, used to hold and enter the WARP namespace
 # nftables     WARP installs its rules with nft; we add NAT/MSS rules with it
 # iptables     docker's FORWARD policy is DROP, we add explicit accepts
 # kmod         modprobe for nf modules where the host allows it
@@ -59,6 +60,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       procps \
       python3 \
       tini \
+      util-linux \
  && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
@@ -111,7 +113,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # State directories, declared as volumes so identity survives a container
 # replace. Losing /var/lib/tailscale makes the node appear as a new device.
 RUN install -d -m 0755 /var/lib/tailscale /var/lib/cloudflare-warp \
- && install -d -m 0755 /var/run/netns /etc/netns \
  && install -d -m 0755 /var/log/cfw2tsen
 
 COPY scripts/ /usr/local/lib/cfw2tsen/

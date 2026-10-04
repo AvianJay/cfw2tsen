@@ -154,9 +154,19 @@ docker run -d --name cfw2tsen \
 ```
 
 > **Why `SYS_ADMIN`.** Creating a network namespace (`unshare(CLONE_NEWNET)`)
-> and entering it (`setns`) require `CAP_SYS_ADMIN`; `NET_ADMIN` alone covers the
-> nftables rules but not the namespace. The split deployment's `warp-gateway`
-> does not need it, because that role does not create one.
+> and entering it (`nsenter`) require `CAP_SYS_ADMIN`; `NET_ADMIN` alone covers
+> the nftables rules but not the namespace. The split deployment's
+> `warp-gateway` does not need it, because that role does not create one.
+>
+> **Why not `ip netns`.** The namespace is held open by a long-lived
+> `unshare --net` process and entered with `nsenter`, rather than with
+> `ip netns add`. That is deliberate: `ip netns add` bind-mounts the namespace
+> into `/run/netns`, and Docker's default AppArmor profile denies
+> `mount --make-shared /run/netns`, so it fails with
+> `mount --make-shared /run/netns failed: Permission denied` even with
+> `CAP_SYS_ADMIN`. Holding the namespace with a process needs no mount and works
+> under the default profile. The trade-off is that the namespace is addressed by
+> PID instead of by name; `warpctl shell` and `warpctl nft` handle that for you.
 >
 > **If your runtime still refuses the capability list** — older containerd and
 > Podman are the usual culprits — use `--privileged` instead. That always works,

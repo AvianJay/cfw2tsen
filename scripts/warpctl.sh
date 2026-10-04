@@ -69,8 +69,9 @@ cmd_routes() {
 }
 
 cmd_shell() {
-    if [ -n "${WARP_NETNS:-}" ]; then
-        exec ip netns exec "$WARP_NETNS" bash
+    local pid
+    if pid="$(_ns_pid)"; then
+        exec nsenter --net="/proc/${pid}/ns/net" -- bash
     fi
     exec bash
 }
@@ -78,9 +79,9 @@ cmd_shell() {
 cmd_nft() {
     echo "=== root netns ==="
     nft list ruleset 2>&1 || true
-    if [ -n "${WARP_NETNS:-}" ] && ns_exists; then
+    if ns_exists; then
         echo
-        echo "=== netns ${WARP_NETNS} ==="
+        echo "=== netns ${WARP_NETNS} (pid $(_ns_pid)) ==="
         ns_run nft list ruleset 2>&1 || true
     fi
 }
