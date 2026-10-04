@@ -7,6 +7,7 @@ Run this in CI to catch it.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,13 +17,42 @@ TEXT_SUFFIXES = {".sh", ".yml", ".yaml", ".md", ".py", ".json"}
 TEXT_NAMES = {"Dockerfile", ".env.example", ".dockerignore", ".gitignore",
               ".gitattributes", "LICENSE"}
 
+# Directories that are never part of the repository content.
+SKIP_DIRS = {".git", ".ci", "node_modules", "__pycache__", ".venv", "venv"}
+
+
+def candidate_files() -> list[Path]:
+    """Tracked files when in a git checkout, otherwise a filesystem walk.
+
+    Using git keeps local scratch directories (downloaded linters, CI logs) out
+    of the check; those are not part of the repository and may legitimately hold
+    binary or UTF-16 content.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=ROOT, capture_output=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        out = b""
+    if out:
+        return [ROOT / p for p in out.decode("utf-8").split("\0") if p]
+
+    files = []
+    for path in sorted(ROOT.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts):
+            continue
+        files.append(path)
+    return files
+
+
 problems: list[str] = []
 checked = 0
 
-for path in sorted(ROOT.rglob("*")):
+for path in candidate_files():
     if not path.is_file():
-        continue
-    if ".git" in path.parts:
         continue
     if path.suffix not in TEXT_SUFFIXES and path.name not in TEXT_NAMES:
         continue

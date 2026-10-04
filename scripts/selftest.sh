@@ -76,7 +76,8 @@ else
 fi
 
 # ...and a configuration that co-locates WARP with Tailscale must fail.
-if MODE=all-in-one WARP_NETNS= TS_AUTHKEY=tskey-auth-test-only \
+# WARP_NETNS must be empty here, hence WARP_NETNS='' rather than WARP_NETNS=.
+if MODE=all-in-one WARP_NETNS='' TS_AUTHKEY=tskey-auth-test-only \
    bash "${SELF_DIR}/check-config.sh" >/dev/null 2>&1; then
     bad "check-config accepted WARP without a netns in all-in-one mode"
 else
@@ -97,6 +98,8 @@ section "MDM XML escaping"
 # A '&' or '<' in a service-token secret must not produce malformed XML, which
 # warp-svc would silently ignore.
 mdm_tmp="$(mktemp -d)"
+# write_mdm_config reads WARP_STATE_DIR from the environment, so export it for
+# the subshell rather than assigning a shell-local it would not see.
 (
     # shellcheck source=lib.sh
     . "${SELF_DIR}/lib.sh"
@@ -105,6 +108,7 @@ mdm_tmp="$(mktemp -d)"
     # shellcheck source=warp.sh
     . "${SELF_DIR}/warp.sh"
     WARP_STATE_DIR="$mdm_tmp"
+    export WARP_STATE_DIR
     write_mdm_config 'team&co' 'id<with>chars' 'secret&value'
 ) >/dev/null 2>&1
 if [ -f "$mdm_tmp/mdm.xml" ] \

@@ -218,10 +218,13 @@ fi
 
 echo
 echo "== forwarding sysctls =="
-for k in net.ipv4.ip_forward; do
-    v="$(sysctl -n "$k" 2>/dev/null || echo '?')"
-    [ "$v" = "1" ] && ok "${k}=1" || bad "${k}=${v} (expected 1)"
-done
+# ip_forward is the one that matters for forwarding traffic.
+ipf="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo '?')"
+if [ "$ipf" = "1" ]; then
+    ok "net.ipv4.ip_forward=1"
+else
+    bad "net.ipv4.ip_forward=${ipf} (expected 1)"
+fi
 
 dump_state
 

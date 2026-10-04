@@ -14,3 +14,6 @@ warp-state/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local CI scratch (downloaded linters, logs).
+.ci/

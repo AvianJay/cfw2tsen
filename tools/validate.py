@@ -186,10 +186,27 @@ dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 check("cloudflare-warp" in dockerfile, "installs cloudflare-warp")
 check("pkg.cloudflareclient.com/pubkey.gpg" in dockerfile,
       "fetches the Cloudflare signing key at build time")
-check("COPY --from=tailscale-src /usr/local/bin/tailscaled" in dockerfile,
-      "copies tailscaled from the official image")
-check("COPY --from=tailscale-src /usr/local/bin/tailscale " in dockerfile,
-      "copies the tailscale CLI from the official image")
+
+# Tailscale must come from the vendor apt repository, using the same URLs the
+# official installer uses; guessing at an image's internal layout is fragile.
+check("pkgs.tailscale.com" in dockerfile, "installs Tailscale from pkgs.tailscale.com")
+check(".noarmor.gpg" in dockerfile, "fetches the Tailscale signing key")
+check(".tailscale-keyring.list" in dockerfile,
+      "installs the Tailscale apt source list")
+check("tailscaled --version" in dockerfile,
+      "verifies the Tailscale binaries at build time")
+check("COPY --from=tailscale-src" not in dockerfile,
+      "does not copy binaries out of an unrelated image's layout")
+
+# An ARG declared before FROM is not visible inside a stage; it must be
+# re-declared after FROM or a `set -u` shell aborts the build.
+for arg in ("TAILSCALE_VERSION", "TRACK"):
+    pre_from = re.search(rf"^ARG {arg}", dockerfile, re.MULTILINE)
+    if not pre_from:
+        continue
+    after_from = dockerfile[dockerfile.index("FROM ") :]
+    check(re.search(rf"^ARG {arg}\b", after_from, re.MULTILINE) is not None,
+          f"ARG {arg} is re-declared after FROM (otherwise it is unset in the build stage)")
 check("ENTRYPOINT" in dockerfile and "tini" in dockerfile,
       "uses tini as the init process")
 check("HEALTHCHECK" in dockerfile, "declares a healthcheck")

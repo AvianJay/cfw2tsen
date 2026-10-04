@@ -9,7 +9,6 @@
 set -euo pipefail
 
 WARP_SVC_PID=""
-DBUS_PID=""
 WARP_STATE_DIR="${WARP_STATE_DIR:-/var/lib/cloudflare-warp}"
 WARP_SLEEP="${WARP_SLEEP:-5}"
 

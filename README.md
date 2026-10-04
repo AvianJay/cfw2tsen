@@ -382,6 +382,9 @@ forwards other devices' traffic. Concretely:
 ```bash
 docker build -t cfw2tsen .
 
+# Pin the Tailscale version (default: whatever the stable repo ships):
+docker build --build-arg TAILSCALE_VERSION=1.80.3 -t cfw2tsen .
+
 # Validate the image without touching the network:
 docker run --rm --cap-add NET_ADMIN --cap-add MKNOD --device /dev/net/tun \
   cfw2tsen selftest
@@ -395,9 +398,13 @@ docker run --rm \
   cfw2tsen smoke
 ```
 
-The image re-fetches Cloudflare's repository signing key on every build. This is
-deliberate: the key was rotated on 2025-09-12 and the repository stopped working
-for keys installed before then, so a cached key breaks the build.
+Both vendor clients come from their **own apt repositories** —
+`pkg.cloudflareclient.com` and `pkgs.tailscale.com` — using the same URLs each
+vendor's installer uses, so the image tracks the supported install path.
+
+Cloudflare's signing key is re-fetched on every build. This is deliberate: the
+key was rotated on 2025-09-12 and the repository stopped working for keys
+installed before then, so a cached key breaks the build.
 
 ### CI
 

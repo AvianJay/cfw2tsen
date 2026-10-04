@@ -14,21 +14,21 @@
 # See https://github.com/tailscale/tailscale/issues/15288
 
 ARG DEBIAN_RELEASE=bookworm
-ARG TAILSCALE_IMAGE=tailscale/tailscale:stable
-
-# ---------------------------------------------------------------------------
-# Tailscale binaries.
-#
-# Copied from the official image instead of using install.sh / the apt repo so
-# the version is pinned by a build arg and is identical across architectures.
-# tailscaled is a static Go binary, so it runs unmodified on the Debian base.
-# ---------------------------------------------------------------------------
-FROM ${TAILSCALE_IMAGE} AS tailscale-src
+# Empty means "whatever the repository currently ships". Set it to pin, e.g.
+# --build-arg TAILSCALE_VERSION=1.80.3
+ARG TAILSCALE_VERSION=
+ARG TRACK=stable
 
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
 FROM debian:${DEBIAN_RELEASE}-slim AS runtime
+
+# ARGs declared before FROM are only visible to FROM instructions, so they must
+# be re-declared here. Without this, `set -u` in the RUN below aborts the build
+# on an unbound variable.
+ARG TAILSCALE_VERSION
+ARG TRACK
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -81,8 +81,32 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
  && apt-get install -y --no-install-recommends cloudflare-warp \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=tailscale-src /usr/local/bin/tailscaled /usr/local/bin/tailscaled
-COPY --from=tailscale-src /usr/local/bin/tailscale  /usr/local/bin/tailscale
+# ---------------------------------------------------------------------------
+# Tailscale, from the vendor's own apt repository.
+#
+# The repository URL and key come from the URLs that Tailscale's installer
+# script (scripts/installer.sh) uses for the keyring method, so this tracks the
+# supported install path rather than guessing at an image's internal layout.
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -euo pipefail \
+ && . /etc/os-release \
+ && curl -fsSL "https://pkgs.tailscale.com/${TRACK}/debian/${VERSION_CODENAME}.noarmor.gpg" \
+      > /usr/share/keyrings/tailscale-archive-keyring.gpg \
+ && chmod 0644 /usr/share/keyrings/tailscale-archive-keyring.gpg \
+ && curl -fsSL "https://pkgs.tailscale.com/${TRACK}/debian/${VERSION_CODENAME}.tailscale-keyring.list" \
+      > /etc/apt/sources.list.d/tailscale.list \
+ && chmod 0644 /etc/apt/sources.list.d/tailscale.list \
+ && apt-get update \
+ && if [ -n "${TAILSCALE_VERSION}" ]; then \
+        apt-get install -y --no-install-recommends "tailscale=${TAILSCALE_VERSION}" tailscale-archive-keyring; \
+    else \
+        apt-get install -y --no-install-recommends tailscale tailscale-archive-keyring; \
+    fi \
+ && rm -rf /var/lib/apt/lists/* \
+ && tailscaled --version \
+ && tailscale --version
 
 # State directories, declared as volumes so identity survives a container
 # replace. Losing /var/lib/tailscale makes the node appear as a new device.
