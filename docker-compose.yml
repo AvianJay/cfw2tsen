@@ -13,7 +13,7 @@ services:
   cfw2tsen:
     build:
       context: .
-    image: ghcr.io/your-user/cfw2tsen:latest
+    image: ghcr.io/AvianJay/cfw2tsen:latest
     container_name: cfw2tsen
     hostname: cfw2tsen
 
