@@ -138,6 +138,10 @@ write_dnsmasq_config() {
         # Stay in the foreground so the PID we record is the process that is
         # actually serving, not a parent that exits as soon as it has forked.
         echo "keep-in-foreground"
+        # Log to stderr, which the caller redirects into a file. There is no
+        # syslog daemon in this container, and the startup log is where dnsmasq
+        # reports an upstream it has silently discarded.
+        echo "log-facility=-"
         # Everything in this container already runs as root; do not depend on
         # the dnsmasq system user existing in the image.
         echo "user=root"
@@ -194,6 +198,9 @@ start_root_dns_stub() {
     fi
 
     log_info "Starting root-namespace DNS stub (${WARP_DNS_V4_A}, ${WARP_DNS_V4_B}, ${VETH_HOST_IP:-10.200.0.1})"
+    # Truncate: the startup log is scanned below for discarded upstreams, so it
+    # must not carry lines from a previous start.
+    : > /var/log/cfw2tsen/dnsmasq.log 2>/dev/null || true
     dnsmasq --conf-file="$DNSMASQ_CONF" >>/var/log/cfw2tsen/dnsmasq.log 2>&1 &
     DNS_STUB_PID=$!
 
@@ -214,6 +221,16 @@ start_root_dns_stub() {
         log_error "The DNS stub exited immediately. Last log lines:"
         tail -n 20 /var/log/cfw2tsen/dnsmasq.log >&2 2>/dev/null || true
         return 1
+    fi
+
+    # dnsmasq silently DISCARDS an upstream whose address matches one of its own
+    # listening addresses ("ignoring nameserver ... - local interface"). That
+    # would leave the stub up but unable to resolve anything, which is the same
+    # user-visible failure as having no stub at all. Catch it explicitly.
+    if grep -q 'ignoring nameserver' /var/log/cfw2tsen/dnsmasq.log 2>/dev/null; then
+        log_error "The DNS stub discarded an upstream resolver as a 'local interface':"
+        grep 'ignoring nameserver' /var/log/cfw2tsen/dnsmasq.log >&2 || true
+        log_error "Upstreams in use: $(tr '\n' ' ' < "$DNS_UPSTREAM_FILE" 2>/dev/null || echo none)"
     fi
 
     log_info "Root-namespace DNS stub is up (pid ${DNS_STUB_PID})"

@@ -89,6 +89,14 @@ if smoke_step is not None:
           "smoke test enables ip_forward")
     check("--privileged" not in smoke_run,
           "smoke test does not rely on --privileged")
+    # Both compose files run on a user-defined network, where Docker points
+    # /etc/resolv.conf at its embedded 127.0.0.11. dnsmasq discards an upstream
+    # matching one of its own listening addresses, so the stub's forwarding must
+    # be exercised on such a network; the default bridge would never test it.
+    check("--network " in smoke_run,
+          "smoke test runs on a user-defined network (matches both compose files)")
+    check("DNS_STRICT_FORWARD=1" in smoke_run,
+          "smoke test asserts the DNS stub forwards to a loopback upstream")
 
 # Every capability the README tells users to pass must also appear in the
 # all-in-one compose file.

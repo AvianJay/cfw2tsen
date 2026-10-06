@@ -309,6 +309,29 @@ if [ -n "${WARP_NETNS:-}" ]; then
     else
         ok "ss is unavailable; relying on the resolution checks above"
     fi
+
+    # dnsmasq silently discards an upstream whose address equals one of its own
+    # listening addresses ("ignoring nameserver ... - local interface"). The stub
+    # would then listen but resolve nothing -- the same user-visible failure as
+    # having no stub. Both compose files run on a user-defined network, where the
+    # container's resolver is Docker's embedded 127.0.0.11, so this path must be
+    # exercised with a real query rather than assumed.
+    if [ "$(env_bool DNS_STRICT_FORWARD 0)" = "1" ]; then
+        if grep -q 'ignoring nameserver' /var/log/cfw2tsen/dnsmasq.log 2>/dev/null; then
+            bad "the stub discarded an upstream resolver: $(grep -m1 'ignoring nameserver' /var/log/cfw2tsen/dnsmasq.log)"
+        else
+            ok "the stub kept every configured upstream resolver"
+        fi
+
+        # Resolve a real name through the stub, forcing it to forward upstream.
+        if command -v dig >/dev/null 2>&1; then
+            if dig +time=5 +tries=2 "@${WARP_DNS_V4_A:-127.0.2.2}" one.one.one.one +short 2>/dev/null | grep -qE '^[0-9]+\.'; then
+                ok "the stub forwards real queries to its upstream resolver"
+            else
+                bad "the stub cannot forward to its upstream resolver (upstream: $(tr '\n' ' ' < "$DNS_UPSTREAM_FILE" 2>/dev/null || echo none))"
+            fi
+        fi
+    fi
 fi
 
 echo

@@ -186,9 +186,17 @@ jobs:
       # contacting Cloudflare or Tailscale. The capability set is exactly the one
       # the README and compose file document, so documentation drift fails the
       # build here rather than on a user's host.
+      #
+      # Run on a user-defined network on purpose. Both compose files use one, and
+      # Docker then points /etc/resolv.conf at its embedded resolver 127.0.0.11
+      # instead of a host address. dnsmasq discards an upstream that matches one
+      # of its own listening addresses, so the stub must keep working with a
+      # loopback upstream -- on the default bridge that case is never exercised.
       - name: Networking smoke test (documented capability set)
         run: |
+          docker network create --subnet 10.1.0.0/29 cfw2tsen-smoke
           docker run --rm \
+            --network cfw2tsen-smoke \
             --cap-add NET_ADMIN \
             --cap-add NET_RAW \
             --cap-add SYS_ADMIN \
@@ -197,7 +205,9 @@ jobs:
             --sysctl net.ipv4.ip_forward=1 \
             --sysctl net.ipv6.conf.all.forwarding=1 \
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -e DNS_STRICT_FORWARD=1 \
             cfw2tsen:test smoke
+          docker network rm cfw2tsen-smoke
 
       - name: Configuration validation
         run: |
