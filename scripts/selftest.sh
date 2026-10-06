@@ -39,7 +39,7 @@ done
 # ---------------------------------------------------------------------------
 section "Required binaries"
 # ---------------------------------------------------------------------------
-for c in bash ip nft iptables curl jq dbus-daemon warp-svc warp-cli tailscaled tailscale tini python3 unshare nsenter; do
+for c in bash ip nft iptables curl jq dbus-daemon warp-svc warp-cli tailscaled tailscale tini python3 unshare nsenter dnsmasq dig; do
     if command -v "$c" >/dev/null 2>&1; then
         ok "found $c"
     else
@@ -135,6 +135,83 @@ else
     grep -n 'auth_client_id' -A1 "$mdm_tmp/mdm.xml" 2>/dev/null | sed 's/^/        /' || true
 fi
 rm -rf "$mdm_tmp"
+
+# ---------------------------------------------------------------------------
+section "Root-namespace DNS stub"
+# ---------------------------------------------------------------------------
+# The container's /etc/resolv.conf is shared with the WARP network namespace and
+# cannot be duplicated: Docker's default AppArmor profile denies `mount`
+# outright, so `unshare --mount` fails and no bind mount is possible. Instead a
+# stub resolver runs in the ROOT namespace on the same 127.0.2.2/127.0.2.3 that
+# WARP uses inside its own namespace. If that stub cannot bind, DNS dies for
+# tailscaled the moment WARP connects -- exactly the bug this guards against.
+dns_tmp="$(mktemp -d)"
+(
+    # shellcheck source=lib.sh
+    . "${SELF_DIR}/lib.sh"
+    # shellcheck source=dns.sh
+    . "${SELF_DIR}/dns.sh"
+    DNSMASQ_CONF="$dns_tmp/dnsmasq.conf"
+    DNS_UPSTREAM_FILE="$dns_tmp/upstream.conf"
+    export DNSMASQ_CONF DNS_UPSTREAM_FILE
+    write_dnsmasq_config
+) >/dev/null 2>&1
+
+if [ -s "$dns_tmp/dnsmasq.conf" ]; then
+    ok "the stub resolver configuration is generated"
+else
+    bad "the stub resolver configuration was not generated"
+fi
+if grep -q '^no-resolv' "$dns_tmp/dnsmasq.conf" 2>/dev/null; then
+    ok "the stub ignores /etc/resolv.conf (no forwarding loop)"
+else
+    bad "the stub would read /etc/resolv.conf and forward to itself"
+fi
+if grep -q '^listen-address=127.0.2.2' "$dns_tmp/dnsmasq.conf" 2>/dev/null; then
+    ok "the stub listens on WARP's 127.0.2.2 in the root namespace"
+else
+    bad "the stub does not listen on 127.0.2.2"
+fi
+
+# Prove the address can actually be owned and served, hermetically: a local
+# address= record means no upstream is contacted, so this cannot flake.
+if command -v dnsmasq >/dev/null 2>&1 && command -v dig >/dev/null 2>&1; then
+    if ip addr add 127.0.2.2/32 dev lo 2>/dev/null || ip -4 addr show dev lo | grep -q '127.0.2.2'; then
+        cat > "$dns_tmp/bind.conf" <<EOF
+no-resolv
+bind-interfaces
+port=53
+listen-address=127.0.2.2
+keep-in-foreground
+user=root
+address=/selftest.cfw2tsen/127.0.0.1
+EOF
+        dnsmasq --conf-file="$dns_tmp/bind.conf" >/dev/null 2>&1 &
+        dns_pid=$!
+        answered=0
+        for _ in $(seq 1 20); do
+            if dig +time=1 +tries=1 @127.0.2.2 selftest.cfw2tsen +short 2>/dev/null | grep -q '127.0.0.1'; then
+                answered=1
+                break
+            fi
+            sleep 0.5
+        done
+        kill "$dns_pid" 2>/dev/null || true
+        wait "$dns_pid" 2>/dev/null || true
+        ip addr del 127.0.2.2/32 dev lo 2>/dev/null || true
+
+        if [ "$answered" = "1" ]; then
+            ok "a stub resolver binds 127.0.2.2 and answers queries in the root namespace"
+        else
+            bad "a stub resolver could not serve 127.0.2.2 in the root namespace"
+        fi
+    else
+        bad "could not assign 127.0.2.2 to lo (needs NET_ADMIN)"
+    fi
+else
+    skipped "dnsmasq/dig not available; skipping the stub bind test"
+fi
+rm -rf "$dns_tmp"
 
 # ---------------------------------------------------------------------------
 section "Kernel capabilities (optional)"

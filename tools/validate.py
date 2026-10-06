@@ -228,9 +228,9 @@ for name in ("selftest.sh", "smoke.sh", "check-config.sh"):
 print("\n== scripts ==")
 scripts = sorted((ROOT / "scripts").glob("*.sh"))
 check(len(scripts) >= 8, f"found {len(scripts)} shell scripts")
-for name in ("entrypoint.sh", "lib.sh", "netns.sh", "warp.sh", "tailscale.sh",
-             "healthcheck.sh", "warpctl.sh", "tsctl.sh", "selftest.sh",
-             "smoke.sh", "check-config.sh"):
+for name in ("entrypoint.sh", "lib.sh", "netns.sh", "dns.sh", "warp.sh",
+             "tailscale.sh", "healthcheck.sh", "warpctl.sh", "tsctl.sh",
+             "selftest.sh", "smoke.sh", "check-config.sh"):
     check((ROOT / "scripts" / name).is_file(), f"scripts/{name} exists")
 
 # Every script that sources lib.sh at top level must set a log level before
@@ -335,7 +335,8 @@ smoke_case = re.search(r"smoke\)(.*?);;", entry, re.DOTALL)
 check(smoke_case is not None, "entrypoint handles the smoke subcommand")
 if smoke_case:
     body = smoke_case.group(1)
-    for helper in ("ns_create", "setup_veth_pair", "setup_warpns_underlay"):
+    for helper in ("ns_create", "setup_veth_pair", "setup_warpns_underlay",
+                   "start_root_dns_stub"):
         check(helper in body,
               f"smoke subcommand calls {helper} (it asserts on that topology)")
 
@@ -359,22 +360,47 @@ check("util-linux" in dockerfile,
 for binary in ("unshare", "nsenter"):
     check(binary in dockerfile, f"self test covers {binary}")
 
-print("\n== dns isolation ==")
-# The namespace holder must unshare the MOUNT namespace as well as the network
-# namespace. Without it both sides share one /etc/resolv.conf, WARP's rewrite to
-# 127.0.2.2 leaks into the root namespace, and DNS breaks for tailscaled.
+print("\n== dns ==")
+# Docker's default AppArmor profile contains a blanket `deny mount,`, so the
+# container cannot create a mount namespace or bind mount anything. The WARP
+# namespace must therefore be held with `unshare --net` alone: `--mount` dies
+# with "cannot change root filesystem propagation: Permission denied".
+# /etc/resolv.conf is shared and made correct for both namespaces by a stub
+# resolver in the root namespace.
 lib = (ROOT / "scripts/lib.sh").read_text(encoding="utf-8")
-check("unshare --net --mount" in lib,
-      "the namespace holder unshares --mount (isolates /etc/resolv.conf)")
-check("ns_has_mount_isolation" in lib,
-      "mount-namespace isolation is detectable")
-check(re.search(r"ns_run\(\)\s*\{.*?--mount=", lib, re.DOTALL) is not None,
-      "ns_run enters the mount namespace when isolation is available")
+check(re.search(r"unshare\s+--net\s+--\s+sleep", lib) is not None,
+      "the namespace holder unshares --net only (no mount namespace)")
+check("unshare --net --mount" not in lib,
+      "the namespace holder does not request a mount namespace (AppArmor denies it)")
+check("--mount=" not in lib,
+      "ns_run does not try to enter a mount namespace")
+check("mount --bind" not in lib and "mount --make-rprivate" not in lib,
+      "no script relies on mount(2), which Docker's default profile denies")
 
-# Nothing may write the container's own /etc/resolv.conf: that file belongs to
-# the root namespace, and clobbering it is exactly what broke DNS.
+dns_script = ROOT / "scripts/dns.sh"
+check(dns_script.is_file(), "scripts/dns.sh exists")
+dns = dns_script.read_text(encoding="utf-8")
+check("start_root_dns_stub" in dns,
+      "a root-namespace DNS stub is provided")
+check("127.0.2.2" in dns,
+      "the stub binds WARP's own namespace-local resolver address")
+check("no-resolv" in dns,
+      "the stub does not read /etc/resolv.conf (that would loop back to itself)")
+check("verify_dns" in dns, "DNS is verified in both namespaces")
+check("verify_dns" in (ROOT / "scripts/entrypoint.sh").read_text(encoding="utf-8"),
+      "startup verifies DNS in both namespaces")
+
+# dnsmasq is what implements the stub; without it the image cannot fix DNS.
+check("dnsmasq" in dockerfile, "installs dnsmasq for the root-namespace stub")
+
+# Writing the container's own /etc/resolv.conf is allowed in exactly two places:
+# dns.sh, which owns the shared file and points it at an address both namespaces
+# can reach, and smoke.sh, which deliberately reproduces WARP's rewrite to prove
+# the stub keeps DNS working. Anywhere else it reintroduces the original bug.
 resolv_writers: list[str] = []
 for script in scripts:
+    if script.name in ("dns.sh", "smoke.sh"):
+        continue
     for lineno, line in enumerate(script.read_text(encoding="utf-8").splitlines(), 1):
         stripped = line.strip()
         if stripped.startswith("#"):
@@ -383,11 +409,14 @@ for script in scripts:
            re.search(r"tee\s+(-a\s+)?/etc/resolv\.conf\b", stripped):
             resolv_writers.append(f"{script.name}:{lineno}")
 check(not resolv_writers,
-      "no script writes the container's /etc/resolv.conf "
-      f"(use $WARP_RESOLV_CONF instead; found {resolv_writers})")
+      "only scripts/dns.sh and scripts/smoke.sh write the container's "
+      f"/etc/resolv.conf (found {resolv_writers})")
 
-check("verify_dns" in (ROOT / "scripts/entrypoint.sh").read_text(encoding="utf-8"),
-      "startup verifies DNS in both namespaces")
+# The smoke test must assert the mount-free design, not the removed one.
+smoke = (ROOT / "scripts/smoke.sh").read_text(encoding="utf-8")
+check("ns_has_mount_isolation" not in smoke,
+      "the smoke test no longer asserts mount-namespace isolation")
+check("dnsmasq" in smoke, "the smoke test asserts the root DNS stub is present")
 
 print("\n== docs ==")
 readme = (ROOT / "README.md").read_text(encoding="utf-8")

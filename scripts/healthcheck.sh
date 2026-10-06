@@ -14,6 +14,8 @@ SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 . "${SELF_DIR}/lib.sh"
 # shellcheck source=netns.sh
 . "${SELF_DIR}/netns.sh"
+# shellcheck source=dns.sh
+. "${SELF_DIR}/dns.sh"
 # shellcheck source=warp.sh
 . "${SELF_DIR}/warp.sh"
 # shellcheck source=tailscale.sh
@@ -45,7 +47,13 @@ case "$MODE" in
         if ! ip rule show | grep -qF "iif ${TS_TUN_IFACE:-tailscale0} lookup ${WARP_ROUTE_TABLE:-200}"; then
             fail "exit-node policy routing rule is missing"
         fi
-        printf 'healthy: WARP tunnel %s + tailscaled + steering\n' "$tun"
+
+        # DNS: the container's own resolver must survive WARP rewriting the
+        # shared /etc/resolv.conf to its namespace-local 127.0.2.2. Without the
+        # root-namespace stub, name resolution dies here while the tunnel still
+        # looks healthy.
+        verify_dns || fail "DNS is broken in one of the namespaces"
+        printf 'healthy: WARP tunnel %s + tailscaled + steering + DNS\n' "$tun"
         ;;
     warp-only)
         warp_cli status >/dev/null 2>&1 || fail "warp-svc is not responding"

@@ -159,7 +159,7 @@ docker run -d --name cfw2tsen \
 > `warp-gateway` does not need it, because that role does not create one.
 >
 > **Why not `ip netns`.** The namespace is held open by a long-lived
-> `unshare --net --mount` process and entered with `nsenter`, rather than with
+> `unshare --net` process and entered with `nsenter`, rather than with
 > `ip netns add`. That is deliberate: `ip netns add` bind-mounts the namespace
 > into `/run/netns`, and Docker's default AppArmor profile denies
 > `mount --make-shared /run/netns`, so it fails with
@@ -168,14 +168,19 @@ docker run -d --name cfw2tsen \
 > The trade-off is that the namespace is addressed by PID instead of by name;
 > `warpctl shell` and `warpctl nft` handle that for you.
 >
-> **Why `--mount` as well as `--net`.** The namespace also gets its own mount
-> namespace, so it has its own `/etc/resolv.conf`. This is not cosmetic: WARP
-> rewrites that file to its own resolver on `127.0.2.2`/`127.0.2.3`, which is
-> reachable only from inside the WARP namespace. Sharing one file means WARP's
-> rewrite leaves the container's own resolver pointing at an address that does
-> not exist there, and DNS breaks for tailscaled and everything else —
-> including, confusingly, for the exit node's clients. `ip netns exec` used to
-> provide this isolation implicitly.
+> **Why DNS still works even though `/etc/resolv.conf` is shared.** WARP rewrites
+> `/etc/resolv.conf` to its own resolver on `127.0.2.2`/`127.0.2.3`, which only
+> exists inside the WARP namespace. Because that file lives in the *mount*
+> namespace, one copy is shared with tailscaled — which is why DNS used to break
+> until you turned Tailscale DNS off. Duplicating the file is not possible here:
+> Docker's default AppArmor profile contains a blanket `deny mount,`, so
+> `unshare --mount` dies with `cannot change root filesystem propagation:
+> Permission denied` and no bind mount can be created, whatever capabilities you
+> add. Instead the single shared file is made correct for *both* namespaces: a
+> stub resolver ([dnsmasq](https://dnsmasq.org/)) runs in the container's own
+> namespace on the very same `127.0.2.2`/`127.0.2.3`, so each namespace resolves
+> through its own listener on its own loopback. See
+> [`scripts/dns.sh`](scripts/dns.sh) and `WARP_ROOT_DNS_STUB` below.
 >
 > **If your runtime still refuses the capability list** — older containerd and
 > Podman are the usual culprits — use `--privileged` instead. That always works,
@@ -268,6 +273,7 @@ also change the address by hand in the admin console at any time.
 |---|---|---|
 | `WARP_MODE` | `warp` | `warp` (full tunnel) or `proxy` (SOCKS5). |
 | `WARP_NETNS` | `warpns` | Isolation namespace. **Keep set in all-in-one mode.** |
+| `WARP_ROOT_DNS_STUB` | `1` | Run a stub resolver in the container namespace on `127.0.2.2`/`127.0.2.3`, so the shared `/etc/resolv.conf` stays valid in both namespaces. Leave on unless you supply your own resolver. |
 | `WARP_ENABLE_NAT` | `1` | Masquerade forwarded traffic onto the tunnel. |
 | `WARP_EXCLUDE_TAILSCALE` | `1` | Keep tailnet ranges out of the tunnel. |
 | `WARP_EXCLUDE_EXTRA` | — | Extra split-tunnel exclusions, comma separated. |
@@ -360,7 +366,7 @@ reports `warp=off` with your home IP, the client is not using the exit node yet
 
 | Symptom | Cause and fix |
 |---|---|
-| **DNS broken until Tailscale DNS is turned off** | The two namespaces were sharing `/etc/resolv.conf`. WARP rewrites that file to its own `127.0.2.2`/`127.0.2.3` resolver, which exists only inside the WARP namespace, so the container's own resolver was left pointing at nothing. Each namespace now has its own `resolv.conf`, and startup verifies DNS on both sides. Turning Tailscale DNS off only masked it — the shared file was the real cause. |
+| **DNS broken until Tailscale DNS is turned off** | `/etc/resolv.conf` is one file shared by both network namespaces, and WARP rewrites it to its own `127.0.2.2`/`127.0.2.3` resolver, which exists only inside the WARP namespace — so the container's own resolver was left pointing at nothing. Duplicating the file needs a bind mount, which Docker's default AppArmor profile denies outright (`deny mount,`), so the fix is to run a stub resolver in the container namespace on those same addresses. Both namespaces then resolve through their own listener on their own loopback. Turning Tailscale DNS off only masked the symptom. Verify with `warpctl status` and the `DNS root namespace … / DNS warp namespace …` lines at startup. |
 | `Operation not permitted` opening TUN | Add `--device /dev/net/tun`. containerd ≥ 1.7.24 no longer grants tun/tap by default. |
 | `Unable to connect to CloudflareWARP daemon` | `warp-svc` was not up yet. This image waits for the CLI, so seeing it means the daemon crashed — check `docker logs`. |
 | Exit node works over relays only, no direct connection | WARP and Tailscale share a namespace. Set `WARP_NETNS=warpns`. |

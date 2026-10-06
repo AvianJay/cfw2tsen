@@ -158,16 +158,14 @@ WARP_NETNS="${WARP_NETNS:-}"
 # "mount --make-shared /run/netns failed: Permission denied" even with
 # CAP_SYS_ADMIN. Holding the namespace with a process needs no such mount.
 #
-# The holder unshares the MOUNT namespace as well as the network namespace.
-# That part is essential, not incidental. WARP rewrites /etc/resolv.conf to its
-# own resolver on 127.0.2.2/127.0.2.3, which only exists inside the WARP
-# namespace. With a single shared /etc/resolv.conf that rewrite is visible to
-# tailscaled in the root namespace, whose DNS then dies -- and turning Tailscale
-# DNS off only masks it. `ip netns exec` used to provide this isolation
-# implicitly; unsharing the mount namespace restores it explicitly.
+# Only the NETWORK namespace is unshared; the mount namespace is deliberately
+# left shared. Docker's default AppArmor profile contains a blanket
+# `deny mount,`, so `unshare --mount` cannot even set its propagation --
+# it dies with "cannot change root filesystem propagation: Permission denied" --
+# and no bind mount of any kind is possible, with or without CAP_SYS_ADMIN.
+# /etc/resolv.conf is therefore shared by both namespaces and is made correct
+# for both instead of being duplicated. See scripts/dns.sh.
 NETNS_HOLDER_PID="${NETNS_HOLDER_PID:-/run/cfw2tsen-netns.pid}"
-# Private resolver bind-mounted over /etc/resolv.conf inside the WARP namespace.
-WARP_RESOLV_CONF="${WARP_RESOLV_CONF:-/etc/cfw2tsen/resolv.conf}"
 
 _ns_pid() {
     [ -f "$NETNS_HOLDER_PID" ] || return 1
@@ -185,27 +183,11 @@ ns_exists() {
     _ns_pid >/dev/null 2>&1
 }
 
-# True when the holder has its own mount namespace, so /etc/resolv.conf is
-# private to it and WARP's rewrite cannot reach the root namespace.
-ns_has_mount_isolation() {
-    local pid
-    pid="$(_ns_pid)" || return 1
-    [ -e "/proc/${pid}/ns/mnt" ] || return 1
-    [ "/proc/${pid}/ns/mnt" -ef "/proc/self/ns/mnt" ] && return 1
-    return 0
-}
-
 # ns_run <command...> — run inside the WARP namespace when one is held.
-# Enters the mount namespace too, so the command sees the namespace's own
-# /etc/resolv.conf rather than the root one.
 ns_run() {
     local pid
     if pid="$(_ns_pid)"; then
-        local args=(--net="/proc/${pid}/ns/net")
-        if ns_has_mount_isolation; then
-            args+=(--mount="/proc/${pid}/ns/mnt")
-        fi
-        nsenter "${args[@]}" -- "$@"
+        nsenter --net="/proc/${pid}/ns/net" -- "$@"
     else
         "$@"
     fi
@@ -225,18 +207,11 @@ ns_create() {
 
     mkdir -p "$(dirname "$NETNS_HOLDER_PID")"
 
-    # Seed the namespace's private resolver. warp-svc needs working DNS for the
-    # registration handshake before it installs its own 127.0.2.2 resolver.
-    mkdir -p "$(dirname "$WARP_RESOLV_CONF")"
-    if [ ! -s "$WARP_RESOLV_CONF" ]; then
-        printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > "$WARP_RESOLV_CONF"
-    fi
-
     log_info "Creating network namespace ${ns} (held by unshare)"
 
-    # --mount gives the namespace a private /etc/resolv.conf; the sleeping
-    # process keeps both namespaces alive.
-    unshare --net --mount -- sleep infinity &
+    # The sleeping process is what keeps the namespace alive; nsenter reaches
+    # it through /proc/<pid>/ns/net. Nothing else has to be mounted.
+    unshare --net -- sleep infinity &
     local pid=$!
     printf '%s' "$pid" > "$NETNS_HOLDER_PID"
 
@@ -250,41 +225,35 @@ ns_create() {
         die "Could not create the network namespace (unshare --net failed)."
     fi
 
-    ns_isolate_resolv_conf
-
     ns_run ip link set lo up
     log_info "Created network namespace ${ns} (pid ${pid})"
 }
 
-# Give the WARP namespace its own /etc/resolv.conf.
+# Terminate every process whose network namespace is the holder's.
 #
-# This bind mount is what keeps WARP's rewrite of that file away from the root
-# namespace. Mounts are made private first, so the bind cannot propagate back out
-# of the namespace when the container's / is a shared mount.
-ns_isolate_resolv_conf() {
-    local pid
-    pid="$(_ns_pid)" || return 1
-
-    if ! nsenter --net="/proc/${pid}/ns/net" --mount="/proc/${pid}/ns/mnt" -- \
-         sh -c '
-             mount --make-rprivate / 2>/dev/null || true
-             mkdir -p /etc
-             mount --bind "$1" /etc/resolv.conf
-         ' _ "$WARP_RESOLV_CONF" 2>/dev/null; then
-        log_warn "Could not give the WARP namespace its own /etc/resolv.conf; DNS may be shared with the container."
-        return 1
-    fi
-
-    log_debug "WARP namespace has a private /etc/resolv.conf (${WARP_RESOLV_CONF})"
-    return 0
+# This is how the namespace is emptied on shutdown. `pkill -P 1` would be wrong:
+# the PID namespace is shared with the container, so it would signal this
+# script's own siblings rather than the namespace's members.
+_ns_kill_members() {
+    local holder="$1" p
+    for p in /proc/[0-9]*; do
+        p="${p#/proc/}"
+        [ "$p" = "$holder" ] && continue
+        [ -e "/proc/${p}/ns/net" ] || continue
+        if [ "/proc/${p}/ns/net" -ef "/proc/${holder}/ns/net" ]; then
+            kill -TERM "$p" 2>/dev/null || true
+        fi
+    done
 }
 
 ns_delete() {
     local ns="$1"
     local pid
     pid="$(_ns_pid 2>/dev/null)" || { rm -f "$NETNS_HOLDER_PID"; return 0; }
-    # Kill anything still holding the namespace, then the holder itself.
-    ns_run sh -c 'command -v pkill >/dev/null 2>&1 && pkill -TERM -P 1 2>/dev/null; true' 2>/dev/null || true
+
+    _ns_kill_members "$pid"
+    sleep 0.2
+    # The holder is the last member; killing it releases the namespace.
     kill -TERM "$pid" 2>/dev/null || true
     sleep 0.2
     kill -KILL "$pid" 2>/dev/null || true

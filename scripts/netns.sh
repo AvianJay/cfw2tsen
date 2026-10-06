@@ -93,22 +93,8 @@ setup_warpns_underlay() {
     local ns="$1"
     ns_run ip route replace default via "$VETH_HOST_IP" dev "$VETH_WARP_IF"
 
-    # Point the *namespace's* resolver at Cloudflare for the registration
-    # handshake. WARP later replaces it with its own 127.0.2.2/127.0.2.3
-    # resolver, reachable only inside this namespace -- which is exactly why the
-    # namespace gets its own /etc/resolv.conf.
-    #
-    # Never write the root namespace's /etc/resolv.conf here. Doing that is what
-    # broke DNS for tailscaled and every other process in the container: WARP's
-    # rewrite leaked out of the namespace and left the root side pointing at a
-    # resolver that does not exist there.
-    mkdir -p "$(dirname "$WARP_RESOLV_CONF")"
-    printf 'nameserver 1.1.1.1\nnameserver 1.0.0.1\n' > "$WARP_RESOLV_CONF"
-    ns_isolate_resolv_conf || true
-
     log_info "warpns underlay: default via ${VETH_HOST_IP} dev ${VETH_WARP_IF}"
-    log_debug "root resolv.conf : $(cat /etc/resolv.conf 2>/dev/null | tr '\n' ' ')"
-    log_debug "warpns resolv.conf: $(ns_run cat /etc/resolv.conf 2>/dev/null | tr '\n' ' ')"
+    log_debug "resolv.conf: $(cat /etc/resolv.conf 2>/dev/null | tr '\n' ' ')"
 }
 
 # The root namespace masquerades the WARP underlay as it leaves the container.
@@ -275,46 +261,6 @@ setup_forward_accept() {
     root_nft_table inet cfw2tsen
     root_nft_chain inet cfw2tsen forward '{ type filter hook forward priority 0; policy accept; }'
     log_debug "Forwarding accepted via inet cfw2tsen"
-}
-
-# Prove that name resolution works on BOTH sides of the namespace boundary.
-#
-# These are separate resolvers on purpose: the root namespace (tailscaled, and
-# the exit node's DNS forwarding) uses the container's resolver, while WARP uses
-# its own 127.0.2.2 resolver inside the namespace. A shared /etc/resolv.conf
-# makes one of them point at a resolver that does not exist in that namespace,
-# which surfaces to users as "DNS is broken".
-verify_dns() {
-    [ -n "${WARP_NETNS:-}" ] || return 0
-
-    local root_ok=0 warp_ok=0
-    local root_ns warp_ns
-
-    root_ns="$(cat /etc/resolv.conf 2>/dev/null | awk '/^nameserver/ {printf "%s ", $2}')"
-    warp_ns="$(ns_run cat /etc/resolv.conf 2>/dev/null | awk '/^nameserver/ {printf "%s ", $2}')"
-
-    # Resolve through the root namespace's resolver.
-    if getent hosts one.one.one.one >/dev/null 2>&1 || \
-       curl -fsS --max-time 10 -o /dev/null https://one.one.one.one 2>/dev/null; then
-        root_ok=1
-    fi
-    # Resolve through the namespace's resolver.
-    if ns_run getent hosts one.one.one.one >/dev/null 2>&1 || \
-       ns_run curl -fsS --max-time 10 -o /dev/null https://one.one.one.one 2>/dev/null; then
-        warp_ok=1
-    fi
-
-    log_info "DNS root namespace  [${root_ns% }] : $([ "$root_ok" = 1 ] && echo ok || echo FAILED)"
-    log_info "DNS warp namespace  [${warp_ns% }] : $([ "$warp_ok" = 1 ] && echo ok || echo FAILED)"
-
-    if [ "$root_ok" != 1 ] || [ "$warp_ok" != 1 ]; then
-        if ! ns_has_mount_isolation; then
-            log_error "The WARP namespace shares /etc/resolv.conf with the container."
-            log_error "WARP rewrites that file to 127.0.2.2, which only exists inside the namespace."
-        fi
-        return 1
-    fi
-    return 0
 }
 
 # ---------------------------------------------------------------------------

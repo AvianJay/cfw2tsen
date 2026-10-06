@@ -42,6 +42,7 @@ RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
 # nftables     WARP installs its rules with nft; we add NAT/MSS rules with it
 # iptables     docker's FORWARD policy is DROP, we add explicit accepts
 # kmod         modprobe for nf modules where the host allows it
+# dnsmasq      stub resolver for the root namespace; see scripts/dns.sh
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
@@ -50,6 +51,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       ca-certificates \
       curl \
       dbus \
+      dnsmasq \
+      dnsutils \
       gnupg \
       iproute2 \
       iptables \
@@ -113,7 +116,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # State directories, declared as volumes so identity survives a container
 # replace. Losing /var/lib/tailscale makes the node appear as a new device.
 RUN install -d -m 0755 /var/lib/tailscale /var/lib/cloudflare-warp \
- && install -d -m 0755 /var/log/cfw2tsen
+ && install -d -m 0755 /var/log/cfw2tsen \
+ && install -d -m 0755 /etc/cfw2tsen
 
 COPY scripts/ /usr/local/lib/cfw2tsen/
 RUN chmod 0755 /usr/local/lib/cfw2tsen/*.sh \
@@ -142,6 +146,7 @@ ENV \
     VETH_PREFIX=30 \
     WARP_ROUTE_TABLE=200 \
     WARP_TUN_IFACE=CloudflareWARP \
+    WARP_ROOT_DNS_STUB=1 \
     TS_TAILNET_CIDR=100.64.0.0/10 \
     LOG_LEVEL=info
 

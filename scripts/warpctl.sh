@@ -71,13 +71,10 @@ cmd_routes() {
 cmd_shell() {
     local pid
     if pid="$(_ns_pid)"; then
-        # Enter the mount namespace too, so the shell sees the same
-        # /etc/resolv.conf that warp-svc uses.
-        local args=(--net="/proc/${pid}/ns/net")
-        if ns_has_mount_isolation; then
-            args+=(--mount="/proc/${pid}/ns/mnt")
-        fi
-        exec nsenter "${args[@]}" -- bash
+        # Only the network namespace is unshared; /etc/resolv.conf is shared by
+        # design (Docker's AppArmor profile forbids the mount that would
+        # duplicate it), so there is no mount namespace to enter.
+        exec nsenter --net="/proc/${pid}/ns/net" -- bash
     fi
     exec bash
 }

@@ -17,6 +17,8 @@ SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 . "${SELF_DIR}/lib.sh"
 # shellcheck source=netns.sh
 . "${SELF_DIR}/netns.sh"
+# shellcheck source=dns.sh
+. "${SELF_DIR}/dns.sh"
 # shellcheck source=warp.sh
 . "${SELF_DIR}/warp.sh"
 # shellcheck source=tailscale.sh
@@ -49,6 +51,7 @@ shutdown() {
     if [ "$WARP_ENABLED" = "1" ]; then
         stop_warp_svc 2>/dev/null
     fi
+    stop_root_dns_stub 2>/dev/null
     if [ -n "${WARP_NETNS:-}" ] && ns_exists; then
         ns_delete "$WARP_NETNS" 2>/dev/null
     fi
@@ -78,6 +81,11 @@ bring_up_warp() {
         setup_veth_pair "$WARP_NETNS"
         setup_warpns_underlay "$WARP_NETNS"
         setup_root_underlay_nat "$egress_if"
+        # The stub resolver must exist before warp-svc starts, because WARP
+        # rewrites the shared /etc/resolv.conf to 127.0.2.2 the moment it
+        # connects. See scripts/dns.sh for why the file cannot be duplicated.
+        start_root_dns_stub || log_warn "Root-namespace DNS stub unavailable; DNS may break once WARP rewrites /etc/resolv.conf"
+        point_resolv_conf_at_stub || true
         # Let the namespace resolve and reach the edge before warp-svc starts.
         if ! ns_run ping -c1 -W3 1.1.1.1 >/dev/null 2>&1; then
             log_warn "warpns cannot reach 1.1.1.1 yet; continuing, warp-svc will retry"
@@ -122,10 +130,11 @@ bring_up_warp() {
         verify_forwarded_egress || log_warn "Forwarded-egress verification failed; exit-node clients may not reach the internet."
     fi
 
-    # DNS must work independently in both namespaces. WARP rewrites its own
-    # resolver to 127.0.2.2, which does not exist in the root namespace, so a
-    # shared /etc/resolv.conf silently breaks DNS for tailscaled.
-    verify_dns || log_warn "DNS verification failed; check the resolv.conf of each namespace."
+    # DNS must work independently in both namespaces. WARP rewrites the shared
+    # /etc/resolv.conf to 127.0.2.2, which exists only inside its own namespace;
+    # the root-namespace stub on the same address is what keeps tailscaled
+    # resolving. See scripts/dns.sh.
+    verify_dns || log_warn "DNS verification failed; check the resolvers of each namespace."
 
     log_info "=== WARP is up (tunnel=${tun}) ==="
 }
@@ -232,6 +241,8 @@ main() {
                 ns_create "$WARP_NETNS"
                 setup_veth_pair "$WARP_NETNS"
                 setup_warpns_underlay "$WARP_NETNS"
+                start_root_dns_stub || log_warn "Root-namespace DNS stub unavailable in smoke mode"
+                point_resolv_conf_at_stub || true
             fi
             exec bash "${SELF_DIR}/smoke.sh"
             ;;
@@ -258,7 +269,13 @@ EOF
 
     if [ "$(env_bool SMOKE_TEST 0)" = "1" ]; then
         # Backwards-compatible alias for the same thing.
-        [ -n "${WARP_NETNS:-}" ] && { ns_create "$WARP_NETNS"; setup_veth_pair "$WARP_NETNS"; setup_warpns_underlay "$WARP_NETNS"; }
+        if [ -n "${WARP_NETNS:-}" ]; then
+            ns_create "$WARP_NETNS"
+            setup_veth_pair "$WARP_NETNS"
+            setup_warpns_underlay "$WARP_NETNS"
+            start_root_dns_stub || log_warn "Root-namespace DNS stub unavailable in smoke mode"
+            point_resolv_conf_at_stub || true
+        fi
         exec bash "${SELF_DIR}/smoke.sh"
     fi
 

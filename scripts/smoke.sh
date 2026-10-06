@@ -17,6 +17,8 @@ SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 . "${SELF_DIR}/lib.sh"
 # shellcheck source=netns.sh
 . "${SELF_DIR}/netns.sh"
+# shellcheck source=dns.sh
+. "${SELF_DIR}/dns.sh"
 
 fail=0
 ok()  { printf '  \033[32mPASS\033[0m  %s\n' "$*"; }
@@ -221,33 +223,91 @@ if [ -n "${WARP_NETNS:-}" ]; then
 fi
 
 echo
-echo "== resolv.conf isolation =="
-# The two namespaces must not share /etc/resolv.conf. WARP rewrites its own to
-# 127.0.2.2, which is unreachable from the root namespace, so sharing the file
-# breaks DNS for tailscaled -- a regression otherwise only visible to users as
-# "DNS is broken".
+echo "== shared resolv.conf / root DNS stub =="
+# /etc/resolv.conf lives in the mount namespace and is therefore shared by both
+# network namespaces. Docker's default AppArmor profile has a blanket
+# `deny mount,`, so it CANNOT be duplicated -- `unshare --mount` fails with
+# "cannot change root filesystem propagation: Permission denied". The shared
+# file is instead made correct for both namespaces: a stub resolver in the root
+# namespace listens on the same 127.0.2.2/127.0.2.3 that WARP uses inside its
+# own namespace, and on the veth address both sides can reach.
 if [ -n "${WARP_NETNS:-}" ]; then
-    if ns_has_mount_isolation; then
-        ok "WARP namespace has its own mount namespace"
+    # The holder must be a plain --net unshare. `--mount` is what failed in CI
+    # with "cannot change root filesystem propagation: Permission denied".
+    if grep -qE 'unshare[[:space:]]+--net[[:space:]]+--mount' "${SELF_DIR}/lib.sh"; then
+        bad "lib.sh still creates the holder with unshare --mount (denied by AppArmor)"
     else
-        bad "WARP namespace shares the mount namespace (resolv.conf is not isolated)"
+        ok "the namespace holder unshares only --net (no mount namespace)"
     fi
 
-    # Compare inodes: a bind mount gives a different inode for the same path, so
-    # comparing resolved paths (readlink -f) would wrongly report them equal.
-    root_ino="$(stat -c '%d:%i' /etc/resolv.conf 2>/dev/null || echo root-unknown)"
-    ns_ino="$(ns_run stat -c '%d:%i' /etc/resolv.conf 2>/dev/null || echo ns-unknown)"
-    if [ "$root_ino" != "$ns_ino" ]; then
-        ok "resolv.conf is a different file per namespace (root=${root_ino}, warpns=${ns_ino})"
+    if command -v dnsmasq >/dev/null 2>&1; then
+        ok "dnsmasq is installed for the root-namespace stub"
     else
-        bad "both namespaces share one /etc/resolv.conf (inode ${root_ino})"
+        bad "dnsmasq is missing; the container resolver breaks once WARP rewrites resolv.conf"
     fi
 
-    # The container's own resolver must never be WARP's namespace-local one.
-    if grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.2\.[23]' /etc/resolv.conf 2>/dev/null; then
-        bad "the container's resolv.conf points at WARP's namespace-local resolver"
+    # The decisive regression test: the shared resolv.conf is pointed at WARP's
+    # namespace-local address, exactly as it is after WARP connects, and the root
+    # namespace must still resolve. Before the stub existed this is precisely
+    # what failed, and users saw it as "DNS is broken".
+    cp /etc/resolv.conf "${SMOKE_RESOLV_BACKUP:-/tmp/smoke-resolv.conf.bak}" 2>/dev/null || true
+    if printf 'nameserver %s\nnameserver %s\n' "${WARP_DNS_V4_A:-127.0.2.2}" "${WARP_DNS_V4_B:-127.0.2.3}" > /etc/resolv.conf 2>/dev/null; then
+        if getent hosts "${DNS_PROBE_NAME:-stub.cfw2tsen.internal}" >/dev/null 2>&1; then
+            ok "the root namespace still resolves with resolv.conf pointing at WARP's ${WARP_DNS_V4_A:-127.0.2.2}"
+        else
+            bad "the root namespace cannot resolve when resolv.conf names ${WARP_DNS_V4_A:-127.0.2.2} (the original DNS bug)"
+        fi
+        cp "${SMOKE_RESOLV_BACKUP:-/tmp/smoke-resolv.conf.bak}" /etc/resolv.conf 2>/dev/null || true
     else
-        ok "the container's resolver is not WARP's 127.0.2.x"
+        bad "could not write /etc/resolv.conf to run the DNS regression test"
+    fi
+
+    # Both namespaces must resolve through the file as it stands.
+    if getent hosts "${DNS_PROBE_NAME:-stub.cfw2tsen.internal}" >/dev/null 2>&1; then
+        ok "the root namespace resolves through the stub"
+    else
+        bad "the root namespace cannot resolve through the stub"
+    fi
+
+    # The WARP namespace must also reach a working resolver through the same
+    # shared file. The probe name is answered locally by the stub, so this
+    # proves reachability across the veth without depending on external DNS.
+    if ns_run getent hosts "${DNS_PROBE_NAME:-stub.cfw2tsen.internal}" >/dev/null 2>&1; then
+        ok "the WARP namespace resolves through the shared resolver"
+    else
+        bad "the WARP namespace cannot resolve through the shared resolver"
+    fi
+
+    shared_resolver="$(awk '/^[[:space:]]*nameserver/ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true)"
+    if [ -n "$shared_resolver" ]; then
+        ok "the shared resolv.conf names ${shared_resolver}"
+    else
+        bad "the shared resolv.conf names no resolver"
+    fi
+
+    # The root namespace must already own WARP's resolver address. WARP rewrites
+    # the shared file to 127.0.2.2 the moment it connects; if nothing in the root
+    # namespace listens there, DNS dies for tailscaled at that instant.
+    for addr in "${WARP_DNS_V4_A:-127.0.2.2}" "${WARP_DNS_V4_B:-127.0.2.3}"; do
+        if ip -4 addr show dev lo 2>/dev/null | grep -qF "${addr}/"; then
+            ok "the root namespace owns ${addr} on lo"
+        else
+            bad "the root namespace does not own ${addr}; the shared resolver is dead once WARP rewrites it"
+        fi
+    done
+
+    # And the stub must actually be listening on it. This is the assertion that
+    # would have caught the original bug, where the file named a resolver that
+    # existed in only one of the two namespaces. Check the listener rather than
+    # a real query so the assertion does not depend on external DNS.
+    if command -v ss >/dev/null 2>&1; then
+        if ss -lunH 2>/dev/null | grep -qF "${WARP_DNS_V4_A:-127.0.2.2}:53"; then
+            ok "a resolver is listening on ${WARP_DNS_V4_A:-127.0.2.2}:53 in the root namespace"
+        else
+            bad "nothing is listening on ${WARP_DNS_V4_A:-127.0.2.2}:53 in the root namespace"
+        fi
+    else
+        ok "ss is unavailable; relying on the resolution checks above"
     fi
 fi
 
