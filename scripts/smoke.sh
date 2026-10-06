@@ -221,6 +221,37 @@ if [ -n "${WARP_NETNS:-}" ]; then
 fi
 
 echo
+echo "== resolv.conf isolation =="
+# The two namespaces must not share /etc/resolv.conf. WARP rewrites its own to
+# 127.0.2.2, which is unreachable from the root namespace, so sharing the file
+# breaks DNS for tailscaled -- a regression otherwise only visible to users as
+# "DNS is broken".
+if [ -n "${WARP_NETNS:-}" ]; then
+    if ns_has_mount_isolation; then
+        ok "WARP namespace has its own mount namespace"
+    else
+        bad "WARP namespace shares the mount namespace (resolv.conf is not isolated)"
+    fi
+
+    # Compare inodes: a bind mount gives a different inode for the same path, so
+    # comparing resolved paths (readlink -f) would wrongly report them equal.
+    root_ino="$(stat -c '%d:%i' /etc/resolv.conf 2>/dev/null || echo root-unknown)"
+    ns_ino="$(ns_run stat -c '%d:%i' /etc/resolv.conf 2>/dev/null || echo ns-unknown)"
+    if [ "$root_ino" != "$ns_ino" ]; then
+        ok "resolv.conf is a different file per namespace (root=${root_ino}, warpns=${ns_ino})"
+    else
+        bad "both namespaces share one /etc/resolv.conf (inode ${root_ino})"
+    fi
+
+    # The container's own resolver must never be WARP's namespace-local one.
+    if grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.2\.[23]' /etc/resolv.conf 2>/dev/null; then
+        bad "the container's resolv.conf points at WARP's namespace-local resolver"
+    else
+        ok "the container's resolver is not WARP's 127.0.2.x"
+    fi
+fi
+
+echo
 echo "== forwarding sysctls =="
 # ip_forward is the one that matters for forwarding traffic.
 ipf="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo '?')"

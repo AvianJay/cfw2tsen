@@ -159,14 +159,23 @@ docker run -d --name cfw2tsen \
 > `warp-gateway` does not need it, because that role does not create one.
 >
 > **Why not `ip netns`.** The namespace is held open by a long-lived
-> `unshare --net` process and entered with `nsenter`, rather than with
+> `unshare --net --mount` process and entered with `nsenter`, rather than with
 > `ip netns add`. That is deliberate: `ip netns add` bind-mounts the namespace
 > into `/run/netns`, and Docker's default AppArmor profile denies
 > `mount --make-shared /run/netns`, so it fails with
 > `mount --make-shared /run/netns failed: Permission denied` even with
-> `CAP_SYS_ADMIN`. Holding the namespace with a process needs no mount and works
-> under the default profile. The trade-off is that the namespace is addressed by
-> PID instead of by name; `warpctl shell` and `warpctl nft` handle that for you.
+> `CAP_SYS_ADMIN`. Holding the namespace with a process needs no such mount.
+> The trade-off is that the namespace is addressed by PID instead of by name;
+> `warpctl shell` and `warpctl nft` handle that for you.
+>
+> **Why `--mount` as well as `--net`.** The namespace also gets its own mount
+> namespace, so it has its own `/etc/resolv.conf`. This is not cosmetic: WARP
+> rewrites that file to its own resolver on `127.0.2.2`/`127.0.2.3`, which is
+> reachable only from inside the WARP namespace. Sharing one file means WARP's
+> rewrite leaves the container's own resolver pointing at an address that does
+> not exist there, and DNS breaks for tailscaled and everything else —
+> including, confusingly, for the exit node's clients. `ip netns exec` used to
+> provide this isolation implicitly.
 >
 > **If your runtime still refuses the capability list** — older containerd and
 > Podman are the usual culprits — use `--privileged` instead. That always works,
@@ -351,6 +360,7 @@ reports `warp=off` with your home IP, the client is not using the exit node yet
 
 | Symptom | Cause and fix |
 |---|---|
+| **DNS broken until Tailscale DNS is turned off** | The two namespaces were sharing `/etc/resolv.conf`. WARP rewrites that file to its own `127.0.2.2`/`127.0.2.3` resolver, which exists only inside the WARP namespace, so the container's own resolver was left pointing at nothing. Each namespace now has its own `resolv.conf`, and startup verifies DNS on both sides. Turning Tailscale DNS off only masked it — the shared file was the real cause. |
 | `Operation not permitted` opening TUN | Add `--device /dev/net/tun`. containerd ≥ 1.7.24 no longer grants tun/tap by default. |
 | `Unable to connect to CloudflareWARP daemon` | `warp-svc` was not up yet. This image waits for the CLI, so seeing it means the daemon crashed — check `docker logs`. |
 | Exit node works over relays only, no direct connection | WARP and Tailscale share a namespace. Set `WARP_NETNS=warpns`. |

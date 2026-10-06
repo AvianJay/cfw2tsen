@@ -121,6 +121,12 @@ bring_up_warp() {
         # the tunnel itself works.
         verify_forwarded_egress || log_warn "Forwarded-egress verification failed; exit-node clients may not reach the internet."
     fi
+
+    # DNS must work independently in both namespaces. WARP rewrites its own
+    # resolver to 127.0.2.2, which does not exist in the root namespace, so a
+    # shared /etc/resolv.conf silently breaks DNS for tailscaled.
+    verify_dns || log_warn "DNS verification failed; check the resolv.conf of each namespace."
+
     log_info "=== WARP is up (tunnel=${tun}) ==="
 }
 

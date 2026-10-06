@@ -359,6 +359,36 @@ check("util-linux" in dockerfile,
 for binary in ("unshare", "nsenter"):
     check(binary in dockerfile, f"self test covers {binary}")
 
+print("\n== dns isolation ==")
+# The namespace holder must unshare the MOUNT namespace as well as the network
+# namespace. Without it both sides share one /etc/resolv.conf, WARP's rewrite to
+# 127.0.2.2 leaks into the root namespace, and DNS breaks for tailscaled.
+lib = (ROOT / "scripts/lib.sh").read_text(encoding="utf-8")
+check("unshare --net --mount" in lib,
+      "the namespace holder unshares --mount (isolates /etc/resolv.conf)")
+check("ns_has_mount_isolation" in lib,
+      "mount-namespace isolation is detectable")
+check(re.search(r"ns_run\(\)\s*\{.*?--mount=", lib, re.DOTALL) is not None,
+      "ns_run enters the mount namespace when isolation is available")
+
+# Nothing may write the container's own /etc/resolv.conf: that file belongs to
+# the root namespace, and clobbering it is exactly what broke DNS.
+resolv_writers: list[str] = []
+for script in scripts:
+    for lineno, line in enumerate(script.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if re.search(r">\s*/etc/resolv\.conf\b", stripped) or \
+           re.search(r"tee\s+(-a\s+)?/etc/resolv\.conf\b", stripped):
+            resolv_writers.append(f"{script.name}:{lineno}")
+check(not resolv_writers,
+      "no script writes the container's /etc/resolv.conf "
+      f"(use $WARP_RESOLV_CONF instead; found {resolv_writers})")
+
+check("verify_dns" in (ROOT / "scripts/entrypoint.sh").read_text(encoding="utf-8"),
+      "startup verifies DNS in both namespaces")
+
 print("\n== docs ==")
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
 for topic in ("TS_AUTHKEY", "TS_DEVICE_IP", "WARP_NETNS", "exit node",
